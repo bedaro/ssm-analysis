@@ -1,0 +1,6 @@
+.ipynb_checkpoints/
+.*.swp
+*~
+model_results/*.nc
+model_results/*.out
+ssmhist2cdf/ssmhist2cdf
