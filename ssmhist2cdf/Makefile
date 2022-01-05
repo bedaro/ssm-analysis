@@ -1,6 +1,6 @@
-CXX := c++
-CXXFLAGS += -O3 -march=native -std=c++11 -Wall $(shell ncxx4-config --cflags)
-LIBS := $(shell ncxx4-config --libs)
+CXX := $(shell nc-config --cxx4)
+CXXFLAGS += -O3 -march=native -std=c++11 -Wall $(shell nc-config --cxx4flags)
+LIBS := $(shell nc-config --cxx4libs)
 
 TARGETS := ssmhist2cdf
 
