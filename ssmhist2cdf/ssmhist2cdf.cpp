@@ -56,12 +56,12 @@ int main(int argc, char *argv[]) {
     allDims[0] = timeDim;
     allDims[1] = sigmaDim;
     float time;
-    for(size_t i = 1; i < argc - 1; ++i) {
+    for(size_t i = 1; i < (size_t)(argc - 1); ++i) {
       try {
         std::ifstream level;
         level.exceptions(std::ifstream::failbit|std::ifstream::badbit);
         level.open(argv[i]);
-        int cells;
+        size_t cells;
         size_t t = 0;
         std::string line;
         while(! level.eof()) {
@@ -104,7 +104,7 @@ int main(int argc, char *argv[]) {
           }
           ++t;
         }
-      } catch(std::ifstream::failure e) {
+      } catch(std::ifstream::failure&) {
         std::cout << "Complete parsing for " << argv[i] << " failed at time " << time << std::endl;
       }
     }
