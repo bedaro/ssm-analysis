@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
-import sys
+import time
 import os
+from optparse import OptionParser
 from netCDF4 import Dataset, MFDataset
 import geopandas as gpd
 import numpy as np
 
-# TODO make these commandline options
 domain_nodes_shp = "gis/ssm domain nodes.shp"
 input_var = "DOXG"
 
@@ -31,21 +31,43 @@ def init_output_var(output, var):
 
 def main():
     script_home = os.path.dirname(os.path.realpath(__file__))
-    exist_cdfs = sys.argv[1:-2]
-    output_cdf = sys.argv[-2]
-    output_var = sys.argv[-1]
+    parser = OptionParser(usage="%prog [options] incdf1... outcdf outvar")
+    parser.add_option("-d", dest="domain_node_shapefile",
+            help="Specify a domain node shapefile")
+    parser.add_option("--invar", dest="input_var",
+            help="Extract the values of a different output variable")
+    parser.add_option("-v", "--verbose", action="store_true", dest="verbose",
+            help="Print progress messages during the extraction")
+    parser.set_defaults(domain_node_shapefile=os.path.join(script_home, domain_nodes_shp),
+            input_var="DOXG",
+            verbose=False)
+    (options, args) = parser.parse_args()
+
+    exist_cdfs = args[:-2]
+    output_cdf = args[-2]
+    output_var = args[-1]
 
     indata = MFDataset(exist_cdfs)
-    node_ids = get_node_ids(os.path.join(script_home, domain_nodes_shp))
+    node_ids = get_node_ids(options.domain_node_shapefile)
+    times_ct = len(indata.dimensions['time'])
     if not os.path.exists(output_cdf):
-        times_ct = len(indata.dimensions['time'])
         outdata = init_output(output_cdf, times_ct, node_ids)
         outdata['time'][:] = indata['time'][:] / 3600 / 24
     else:
         outdata = append_output(output_cdf)
     init_output_var(outdata, output_var)
 
-    outdata[output_var][:] = indata[input_var][:, -1, node_ids - 1]
+    start_time = time.perf_counter()
+    for i in range(0,times_ct,60):
+        stop = min(times_ct,i+60)
+        outdata[output_var][i:stop,:] = indata[options.input_var][i:stop, -1, node_ids - 1]
+        if options.verbose:
+            elapsed = (time.perf_counter() - start_time)
+            to_go = elapsed * (times_ct / stop - 1)
+            print("{0}/{1} ({2}s elapsed, {3}s to go)".format(stop,
+                times_ct, int(elapsed), int(to_go)))
+    if options.verbose:
+        print("Finished.")
     indata.close()
     outdata.close()
 
