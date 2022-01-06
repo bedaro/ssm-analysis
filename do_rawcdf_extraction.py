@@ -29,6 +29,12 @@ def append_output(output_cdf):
 def init_output_var(output, var):
     output.createVariable(var, 'f4', ('time','node'))
 
+# Gotten from https://stackoverflow.com/questions/312443/how-do-you-split-a-list-or-iterable-into-evenly-sized-chunks
+def chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i+n]
+
 def main():
     script_home = os.path.dirname(os.path.realpath(__file__))
     parser = OptionParser(usage="%prog [options] incdf1... outcdf outvar")
@@ -38,7 +44,10 @@ def main():
             help="Extract the values of a different output variable")
     parser.add_option("-v", "--verbose", action="store_true", dest="verbose",
             help="Print progress messages during the extraction")
-    parser.set_defaults(domain_node_shapefile=os.path.join(script_home, domain_nodes_shp),
+    parser.add_option("-c", "--chunk-size", type="int", dest="chunk_size",
+            help="Process this many CDF files at once")
+    parser.set_defaults(chunk_size=4,
+            domain_node_shapefile=os.path.join(script_home, domain_nodes_shp),
             input_var="DOXG",
             verbose=False)
     (options, args) = parser.parse_args()
@@ -57,18 +66,25 @@ def main():
         outdata = append_output(output_cdf)
     init_output_var(outdata, output_var)
 
+    # Attempts to use the entire MFDataset don't seem to scale well.
+    # Instead, I'm resorting to a blocking approach where MFDatasets are
+    # created for only a few netCDF files at a time
     start_time = time.perf_counter()
-    for i in range(0,times_ct,60):
-        stop = min(times_ct,i+60)
-        outdata[output_var][i:stop,:] = indata[options.input_var][i:stop, -1, node_ids - 1]
+    indata.close()
+    i = 0
+    for cdfchunk in chunks(exist_cdfs, options.chunk_size):
+        c = MFDataset(cdfchunk)
+        chunk_times = len(c.dimensions['time'])
+        outdata[output_var][i:i+chunk_times,:] = c[options.input_var][:, -1, node_ids - 1]
+        i += chunk_times
+        c.close()
         if options.verbose:
             elapsed = (time.perf_counter() - start_time)
-            to_go = elapsed * (times_ct / stop - 1)
-            print("{0}/{1} ({2}s elapsed, {3}s to go)".format(stop,
+            to_go = elapsed * (times_ct / i - 1)
+            print("{0}/{1} ({2}s elapsed, {3}s to go)".format(i,
                 times_ct, int(elapsed), int(to_go)))
     if options.verbose:
         print("Finished.")
-    indata.close()
     outdata.close()
 
 if __name__ == "__main__": main()
