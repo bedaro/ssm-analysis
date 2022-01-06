@@ -56,9 +56,13 @@ def main():
     output_cdf = args[-2]
     output_var = args[-1]
 
+    if options.verbose:
+        print("Determining scope of work...")
     indata = MFDataset(exist_cdfs)
     node_ids = get_node_ids(options.domain_node_shapefile)
     times_ct = len(indata.dimensions['time'])
+    if options.verbose:
+        print("Initializing output file...")
     if not os.path.exists(output_cdf):
         outdata = init_output(output_cdf, times_ct, node_ids)
         outdata['time'][:] = indata['time'][:] / 3600 / 24
@@ -69,9 +73,11 @@ def main():
     # Attempts to use the entire MFDataset don't seem to scale well.
     # Instead, I'm resorting to a blocking approach where MFDatasets are
     # created for only a few netCDF files at a time
-    start_time = time.perf_counter()
     indata.close()
     i = 0
+    if options.verbose:
+        print("Beginning extraction...")
+    start_time = time.perf_counter()
     for cdfchunk in chunks(exist_cdfs, options.chunk_size):
         c = MFDataset(cdfchunk)
         chunk_times = len(c.dimensions['time'])
