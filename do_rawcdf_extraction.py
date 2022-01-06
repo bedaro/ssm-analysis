@@ -30,12 +30,13 @@ def init_output_var(output, var):
     output.createVariable(var, 'f4', ('time','node'))
 
 def main():
+    script_home = os.path.dirname(os.path.realpath(__file__))
     exist_cdfs = sys.argv[1:-2]
     output_cdf = sys.argv[-2]
     output_var = sys.argv[-1]
 
     indata = MFDataset(exist_cdfs)
-    node_ids = get_node_ids(domain_nodes_shp)
+    node_ids = get_node_ids(os.path.join(script_home, domain_nodes_shp))
     if not os.path.exists(output_cdf):
         times_ct = len(indata.dimensions['time'])
         outdata = init_output(output_cdf, times_ct, node_ids)
