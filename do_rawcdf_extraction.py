@@ -8,7 +8,6 @@ import geopandas as gpd
 import numpy as np
 
 domain_nodes_shp = "gis/ssm domain nodes.shp"
-input_var = "DOXG"
 
 def get_node_ids(shp):
     domain_nodes = gpd.read_file(shp)
@@ -57,12 +56,12 @@ def main():
     output_var = args[-1]
 
     if options.verbose:
-        print("Determining scope of work...")
+        print("Determining scope of work...", flush=True)
     indata = MFDataset(exist_cdfs)
     node_ids = get_node_ids(options.domain_node_shapefile)
     times_ct = len(indata.dimensions['time'])
     if options.verbose:
-        print("Initializing output file...")
+        print("Initializing output file...", flush=True)
     if not os.path.exists(output_cdf):
         outdata = init_output(output_cdf, times_ct, node_ids)
         outdata['time'][:] = indata['time'][:] / 3600 / 24
@@ -75,22 +74,25 @@ def main():
     # created for only a few netCDF files at a time
     indata.close()
     i = 0
+    total = 0
     if options.verbose:
-        print("Beginning extraction...")
+        print("Beginning extraction...", flush=True)
     start_time = time.perf_counter()
     for cdfchunk in chunks(exist_cdfs, options.chunk_size):
         c = MFDataset(cdfchunk)
         chunk_times = len(c.dimensions['time'])
-        outdata[output_var][i:i+chunk_times,:] = c[options.input_var][:, -1, node_ids - 1]
+        data = c[options.input_var][:, -1, node_ids - 1]
+        outdata[output_var][i:i+chunk_times,:] = data
         i += chunk_times
         c.close()
         if options.verbose:
             elapsed = (time.perf_counter() - start_time)
             to_go = elapsed * (times_ct / i - 1)
-            print("{0}/{1} ({2}s elapsed, {3}s to go)".format(i,
-                times_ct, int(elapsed), int(to_go)))
+            total += data.size * data.itemsize
+            print("{0}/{1} ({2}s elapsed, {3}s to go, {4}KBps)".format(i,
+                times_ct, int(elapsed), int(to_go), int(total/elapsed/1000)), flush=True)
     if options.verbose:
-        print("Finished.")
+        print("Finished.", flush=True)
     outdata.close()
 
 if __name__ == "__main__": main()
