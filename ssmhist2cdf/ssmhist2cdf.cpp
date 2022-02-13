@@ -3,9 +3,11 @@
 #include <netcdf>
 #include <vector>
 #include <boost/spirit/include/qi.hpp>
+#include <boost/spirit/include/qi_repeat.hpp>
 #include <boost/spirit/include/phoenix_core.hpp>
 #include <boost/spirit/include/phoenix_operator.hpp>
 #include <boost/spirit/include/phoenix_stl.hpp>
+#include <boost/spirit/include/support_istream_iterator.hpp>
 #include <boost/program_options.hpp>
 
 #define STATEVARS 42
@@ -38,12 +40,46 @@ static const std::array<std::string, 17> output_variables({
   "salinity", "RDOC", "LPOC", "RPOC", "TDIC", "TALK", "pH", "pCO2"
 });
 
-namespace qi = boost::spirit::qi;
-namespace ascii = boost::spirit::ascii;
-namespace phoenix = boost::phoenix;
+namespace spirit = boost::spirit;
 namespace po = boost::program_options;
 
+template <typename It>
+bool parse_block(It& pos, It last, float& time, const unsigned int& state_vars, size_t& cells, std::vector<float>& data) {
+  /*
+   * An approximately EBNF form of the file structure:
+   * <file> ::= {<block>}
+   * <block> ::= <time> <ver> <cell-count>\n
+   *             cell-count*state_vars*{<double>{ |\n}}
+   * <time> ::= <float>
+   * <ver> ::= <int>
+   * <cell-count> ::= <int>
+   * Plainly, each block of the file consists of a header that contains
+   * an integer cell count. What follows in the block is a repetition
+   * of (cell count times state_vars) doubles, each followed by a
+   * newline or one or more spaces.
+   */
+  namespace qi = boost::spirit::qi;
+  namespace phoenix = boost::phoenix;
+  using phoenix::ref;
+  using spirit::repeat;
+  using qi::_1;
+  using qi::float_;
+  using qi::int_;
+  using qi::double_;
+  using phoenix::push_back;
+  using spirit::ascii::space;
+
+  return qi::phrase_parse(pos, last, (
+        float_[ref(time) = _1] >> int_(4) >> int_[ref(cells) = _1] >>
+        repeat(ref(cells))[
+          repeat(ref(state_vars))[
+            double_[push_back(phoenix::ref(data), _1)]
+          ]
+        ]), space);
+}
+
 int main(int argc, char *argv[]) {
+
   po::options_description desc("Allowed options");
   desc.add_options()
     ("help,h", "produce help message")
@@ -87,6 +123,8 @@ int main(int argc, char *argv[]) {
              verbose = vm.count("verbose");
   const unsigned int statevars = vm["state-vars"].as<unsigned int>(),
       statevars_bottom = vm["state-vars-bottom"].as<unsigned int>();
+  // Field width of input file index
+  int input_w = std::ceil(std::log10(input_files.size() + 1));
 
   try {
     // Initialize the netCDF file
@@ -110,29 +148,34 @@ int main(int argc, char *argv[]) {
         if(verbose) {
           std::cout << "=== " << input_files[i] << " ===" << std::endl;
         }
-        size_t cells;
-        size_t t = 0;
-        time = 0;
-        std::string line;
-        while(! level.eof()) {
-          // Get a header line
-          getline(level, line);
+        // Set up our stream iterators
+        // http://boost-spirit.com/home/2010/01/05/stream-based-parsing-made-easy/
+        level.unsetf(std::ios::skipws);
+        spirit::istream_iterator pos(level);
+        spirit::istream_iterator last;
 
-          if(line.length() > 24) {
-            std::cout << line << std::endl;
-            throw "header line is too long!";
-          }
+        // The number of state variables
+        unsigned int our_state_vars = ((i + 1 == input_files.size()) && last_is_bottom?
+                statevars_bottom : statevars);
+        time = 0; // initialize to 0 to accommodate an error check
+        size_t cells; // the number of cells (read from the block)
+        size_t t = 0; // the time index for the current file
+        while(pos != last) {
           float prev_time = time;
-          qi::phrase_parse(line.begin(), line.end(), (
-                qi::float_[phoenix::ref(time) = qi::_1] >
-                qi::float_ >
-                qi::float_[phoenix::ref(cells) = qi::_1]),
-              ascii::space);
-          // "cells" tells how many cells there are output variables for.
-          // Expect to find (state variables times cells) values to parse
+          std::vector<float> data;
+          if(! parse_block(pos, last, time, our_state_vars, cells, data)) {
+            throw "Parse failed!";
+          }
+          // The parse has retrieved time, cells, and data. pos has been
+          // moved to the end of the block.
 
           if(verbose) {
-            std::cout << "TIME " << time << "... " << std::flush;
+            std::cout << "(";
+            std::cout.width(input_w);
+            std::cout << i + 1;
+            std::cout.width(0);
+            std::cout << "/" << input_files.size() <<
+              ") TIME " << time << "... " << std::flush;
           }
           if(prev_time > time) {
             if(verbose) {
@@ -155,36 +198,26 @@ int main(int argc, char *argv[]) {
                   netCDF::NcType::nc_FLOAT, allDims);
             }
           }
-          total = cells *
-            ((i + 1 == input_files.size()) && last_is_bottom?
-                statevars_bottom : statevars);
-          found = 0;
-          std::vector<float> data;
-          while(data.size() < total) {
-            getline(level, line);
-            qi::phrase_parse(line.begin(), line.end(),
-                *(qi::double_[phoenix::push_back(phoenix::ref(data),
-                    qi::_1)]),
-                ascii::space);
-            found = data.size();
-          }
+
+          // Save the data to the CDF
+          // Loop over all the variables to write
+          float *data_raw = data.data();
           for(size_t j = 0; j < output_indices.size(); ++j) {
             netCDF::NcVar v = allVars[j];
             size_t data_index = output_indices[j];
-            for(size_t k = 0; k < cells; ++k) {
-              v.putVar({t, i, k}, data[data_index * cells + k]);
-            }
+            // Write this variable at all the cells in this layer at this
+            // time
+            v.putVar({t, i, 0}, {1, 1, cells}, data_raw + data_index * cells);
           }
           if(verbose) {
             std::cout << " complete." << std::endl;
           }
           ++t;
-          level.peek();
         }
       } catch(std::ifstream::failure&) {
         std::cerr << "Complete parsing for " << input_files[i]
-            << " failed at time " << time << ", found " << found << "/"
-            << total << std::endl;
+            << " failed at time " << time << std::endl;
+        return 1;
       } catch(char const *msg) {
         std::cerr << msg << std::endl;
         return 1;
