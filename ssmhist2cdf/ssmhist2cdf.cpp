@@ -139,7 +139,6 @@ int main(int argc, char *argv[]) {
     allDims[0] = timeDim;
     allDims[1] = sigmaDim;
     float time;
-    size_t total, found;
     for(size_t i = 0; i < input_files.size(); ++i) {
       try {
         std::ifstream level;
