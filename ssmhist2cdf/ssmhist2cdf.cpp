@@ -162,6 +162,14 @@ int main(int argc, char *argv[]) {
         size_t cells; // the number of cells (read from the block)
         size_t t = 0; // the time index for the current file
         while(pos != last) {
+          if(verbose) {
+            std::cout << "(";
+            std::cout.width(input_w);
+            std::cout << i + 1;
+            std::cout.width(0);
+            std::cout << "/" << input_files.size() << ") TIME " <<
+              std::flush;
+          }
           float prev_time = time;
           std::vector<float> data;
           if(! parse_block(pos, last, time, our_state_vars, cells, data)) {
@@ -171,12 +179,7 @@ int main(int argc, char *argv[]) {
           // moved to the end of the block.
 
           if(verbose) {
-            std::cout << "(";
-            std::cout.width(input_w);
-            std::cout << i + 1;
-            std::cout.width(0);
-            std::cout << "/" << input_files.size() <<
-              ") TIME " << time << "... " << std::flush;
+            std::cout << time << "... " << std::flush;
           }
           if(prev_time > time) {
             if(verbose) {
