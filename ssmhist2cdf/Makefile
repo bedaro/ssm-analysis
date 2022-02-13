@@ -1,6 +1,6 @@
 CXX := $(shell nc-config --cxx4)
 CXXFLAGS += -O3 -march=native -std=c++11 -Wall $(shell nc-config --cxx4flags)
-LIBS := $(shell nc-config --cxx4libs)
+LIBS := -Wl,-Bstatic -lboost_program_options -Wl,-Bdynamic $(shell nc-config --cxx4libs) -Wl,--as-needed
 
 TARGETS := ssmhist2cdf
 
