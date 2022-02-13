@@ -104,16 +104,18 @@ int main(int argc, char *argv[]) {
   try {
     po::store(po::command_line_parser(argc, argv).
               options(desc).positional(p).run(), vm);
+
+    // Fix from https://stackoverflow.com/a/5517755
+    if(vm.count("help")) {
+      std::cout << USAGE << std::endl << desc << std::endl;
+      return 0;
+    }
+
     po::notify(vm);
   } catch (boost::program_options::error& e) {
     std::cerr << USAGE << std::endl
               << "Try ssmhist2cdf --help" << std::endl;
     return 1;
-  }
-
-  if(vm.count("help")) {
-    std::cout << USAGE << std::endl << desc << std::endl;
-    return 0;
   }
 
   const std::vector<std::string> input_files =
