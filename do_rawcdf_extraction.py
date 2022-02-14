@@ -86,7 +86,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
     args = Namespace(**kwargs)
     if args.verbose:
         print("Determining scope of work...", flush=True)
-    indata = MFDataset(exist_cdfs)
+    indata = MFDataset(exist_cdfs) if len(exist_cdfs) > 1 else Dataset(exist_cdfs[0])
     node_ids = get_node_ids(args.domain_node_shapefile)
     times_ct = len(indata.dimensions['time'])
     if args.verbose:
@@ -108,7 +108,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
         print("Beginning extraction...", flush=True)
     start_time = time.perf_counter()
     for cdfchunk in chunks(exist_cdfs, args.chunk_size):
-        c = MFDataset(cdfchunk)
+        c = MFDataset(cdfchunk) if len(cdfchunk) > 1 else Dataset(cdfchunk[0])
         chunk_times = len(c.dimensions['time'])
         data = c[args.input_var][:, -1, node_ids - 1]
         outdata[args.outvar][i:i+chunk_times,:] = data
