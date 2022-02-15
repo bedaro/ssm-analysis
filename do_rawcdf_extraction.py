@@ -4,6 +4,7 @@ import time
 import os
 import tempfile
 import shutil
+import logging
 from argparse import ArgumentParser, Namespace
 from netCDF4 import Dataset, MFDataset
 import geopandas as gpd
@@ -40,8 +41,10 @@ def main():
     script_home = os.path.dirname(os.path.realpath(__file__))
     parser = ArgumentParser(description="Extract data from SSM netcdf output files")
     parser.add_argument("incdf", nargs="+", help="each input CDF file")
-    parser.add_argument("outcdf", help="the output CDF file (created if it doesn't exist)")
-    parser.add_argument("outvar", help="the variable to store extracted data in the output CDF")
+    parser.add_argument("outcdf",
+            help="the output CDF file (created if it doesn't exist)")
+    parser.add_argument("outvar",
+            help="the variable to store extracted data in the output CDF")
     parser.add_argument("-d", dest="domain_node_shapefile",
             help="Specify a domain node shapefile")
     parser.add_argument("--invar", dest="input_var",
@@ -54,43 +57,38 @@ def main():
             help="Use a read/write cache in a temporary directory")
     parser.set_defaults(chunk_size=4,
             domain_node_shapefile=os.path.join(script_home, domain_nodes_shp),
-            input_var="DOXG",
-            verbose=False)
+            input_var="DOXG", verbose=False)
     args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
 
     if args.cache:
         with tempfile.TemporaryDirectory() as tmpdir:
             exist_cdfs = []
-            if args.verbose:
-                print("Caching input files...", flush=True)
+            logging.info("Caching input files...")
             for infile in args.incdf:
                 newpath = os.path.join(tmpdir, os.path.basename(infile))
                 shutil.copy(infile, newpath)
                 exist_cdfs.append(newpath)
             output_cdf = os.path.join(tmpdir, os.path.basename(args.outcdf))
             if os.path.exists(args.outcdf):
-                if args.verbose:
-                    print("Caching output file...", flush=True)
+                logging.info("Caching output file...")
                 shutil.copy(args.outcdf, output_cdf)
             do_extract(exist_cdfs, output_cdf, **vars(args))
             # Copy the resulting output CDF back
-            if args.verbose:
-                print("Saving output file...", flush=True)
+            logging.info("Saving output file...")
             shutil.copy(output_cdf, args.outcdf)
-            if args.verbose:
-                print("Finished.", flush=True)
+            logging.info("Finished.")
     else:
         do_extract(args.incdf, args.outcdf, **vars(args))
 
 def do_extract(exist_cdfs, output_cdf, **kwargs):
     args = Namespace(**kwargs)
-    if args.verbose:
-        print("Determining scope of work...", flush=True)
+    logging.info("Determining scope of work...")
     indata = MFDataset(exist_cdfs) if len(exist_cdfs) > 1 else Dataset(exist_cdfs[0])
     node_ids = get_node_ids(args.domain_node_shapefile)
     times_ct = len(indata.dimensions['time'])
-    if args.verbose:
-        print("Initializing output file...", flush=True)
+    logging.info("Initializing output file...")
     if not os.path.exists(output_cdf):
         outdata = init_output(output_cdf, times_ct, node_ids)
         outdata['time'][:] = indata['time'][:] / 3600 / 24
@@ -104,8 +102,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
     indata.close()
     i = 0
     total = 0
-    if args.verbose:
-        print("Beginning extraction...", flush=True)
+    logging.info("Beginning extraction...")
     start_time = time.perf_counter()
     for cdfchunk in chunks(exist_cdfs, args.chunk_size):
         c = MFDataset(cdfchunk) if len(cdfchunk) > 1 else Dataset(cdfchunk[0])
@@ -118,11 +115,9 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
             elapsed = (time.perf_counter() - start_time)
             to_go = elapsed * (times_ct / i - 1)
             total += data.size * data.itemsize
-            print("{0}/{1} ({2}s elapsed, {3}s to go, {4}KBps)".format(i,
-                times_ct, int(elapsed), int(to_go), int(total/elapsed/1000)),
-                flush=True)
-    if args.verbose:
-        print("Extraction finished.", flush=True)
+            logging.info("{0}/{1} ({2}s elapsed, {3}s to go, {4}KBps)".format(i,
+                times_ct, int(elapsed), int(to_go), int(total/elapsed/1000)))
+    logging.info("Extraction finished.")
     outdata.close()
 
 if __name__ == "__main__": main()
