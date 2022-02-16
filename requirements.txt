@@ -3,3 +3,4 @@ geopandas
 pandas
 numpy
 py2dm
+openpyxl

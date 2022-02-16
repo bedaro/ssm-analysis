@@ -2,4 +2,5 @@
 .*.swp
 *~
 model_results/*
+notebook_outs/*
 ssmhist2cdf/ssmhist2cdf
