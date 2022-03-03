@@ -5,6 +5,8 @@ A set of tools for analyzing outputs from the Salish Sea Model.
 * `SSM_Grid/*`: 2-D Mesh files defining the model grid.
 * `gis/ssm domain utm.*`: a manually created shapefile defining the analysis
   domain.
+* `gis/ecology masked cells.*`: a manuall created shapefile exported from
+  [Ecology's GDB](https://fortress.wa.gov/ecy/ezshare/EAP/SalishSea/SalishSeaModelBoundingScenarios.html).
 * `gis/ssm domain nodes.*`: a shapefile defining the polygon for each node
   within the analysis domain.
 * `ProcessGrid.ipynb`: A notebook that produces `ssm domain nodes.shp` and
