@@ -123,7 +123,7 @@ def main():
     # Cannot include default values of lists here, see
     # https://bugs.python.org/issue16399
     parser.set_defaults(chunk_size=4, verbose=False,
-            masked_nodes_file=masked_nodes_txt)
+            masked_nodes_file=os.path.join(script_home, masked_nodes_txt))
     args = parser.parse_args()
     # This is the workaround
     if not args.input_vars:
