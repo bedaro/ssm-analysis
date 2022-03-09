@@ -132,7 +132,7 @@ def main():
         args.domain_node_shapefiles = [os.path.join(script_home, domain_nodes_shp)]
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
-    logger.setLevel(logging.DEBUG)
+    #logger.setLevel(logging.DEBUG)
 
     if args.cache:
         with tempfile.TemporaryDirectory() as tmpdir:
