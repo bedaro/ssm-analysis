@@ -124,12 +124,13 @@ def main():
 
     df.to_csv(args.outfile, compression="gzip")
 
-    for n in args.output_node:
-        selection = df.loc[:, n, :][args.output_var]
-        out_file = args.outfile.replace(".csv.gz", "") + "_station_{0}.xlsx".format(n)
-        logger.info("Saving {0} rows of {1} variables for node {2} to {3}".format(
-            len(selection), len(selection.columns), n, out_file))
-        selection.to_excel(out_file)
-    logger.info("Finsihed.")
+    if args.output_node is not None:
+        for n in args.output_node:
+            selection = df.loc[:, n, :][args.output_var]
+            out_file = args.outfile.replace(".csv.gz", "") + "_station_{0}.xlsx".format(n)
+            logger.info("Saving {0} rows of {1} variables for node {2} to {3}".format(
+                len(selection), len(selection.columns), n, out_file))
+            selection.to_excel(out_file)
+    logger.info("Finished.")
 
 if __name__ == "__main__": main()
