@@ -225,4 +225,5 @@ dependencies:
   - libkml==1.3.0=h238a007_1014
   - pygeos
   - py2dm
+  - cmocean
 prefix: /home/benr/miniconda3/envs/ssm-analysis
