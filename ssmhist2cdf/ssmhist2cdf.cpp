@@ -14,6 +14,11 @@
   #include <mpi.h>
   #include "parNcFile.h"
 
+  // Check for C++ bindings (OpenMPI, Intel/MPICH)
+  #if (OMPI_BUILD_CXX_BINDINGS == 0) || MPICH_SKIP_MPICXX
+    #error "OpenMPI C++ bindings are missing, cannot compile"
+  #endif
+
   #define abort(val) MPI::COMM_WORLD.Abort(-1)
 #else
   #define abort(val) return val
