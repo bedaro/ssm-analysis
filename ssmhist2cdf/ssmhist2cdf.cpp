@@ -123,8 +123,9 @@ int main(int argc, char *argv[]) {
   const int procs = 1;
 #else
   MPI::Init(argc, argv);
-  rank = MPI::COMM_WORLD.Get_rank();
-  const int procs = MPI::COMM_WORLD.Get_size();
+  MPI::Comm& mpiComm = MPI::COMM_WORLD;
+  rank = mpiComm.Get_rank();
+  const int procs = mpiComm.Get_size();
 #endif
 
   po::options_description desc("Allowed options");
@@ -186,7 +187,6 @@ int main(int argc, char *argv[]) {
       std::cout << "Running in parallel, " << procs << " processes" << std::endl;
     }
 
-    MPI::Comm& mpiComm = MPI::COMM_WORLD;
     mpiComm.Set_errhandler(MPI::ERRORS_THROW_EXCEPTIONS);
     MPI::Info mpiInfo = MPI::INFO_NULL;
 
@@ -199,21 +199,27 @@ int main(int argc, char *argv[]) {
     std::ifstream level;
     level.exceptions(std::ifstream::failbit|std::ifstream::badbit);
 
+    // Only do this once to ensure processes can't be out of sync due
+    // to I/O based race conditions
     if(rank == 0) {
       // Read the first header line of the first file to get node count
       level.open(input_files[0]);
       header_length = read_header(level, time, nodes);
       level.close();
 
+      // Based on the number of nodes in the model, the state variable
+      // count and the size of each field, we can compute the number of
+      // bytes each time block takes up.
       size_t bytes_per_time = header_length + BYTES_PER_FLOAT * nodes *
         ((input_files.size() == 1) && last_is_bottom? statevars_bottom : statevars);
       // Check the input file size to infer how many times there are
       times = fs::file_size(input_files[0]) / bytes_per_time;
     }
 #ifdef PARALLEL
-    MPI::COMM_WORLD.Bcast(&nodes, 1, MPI::UNSIGNED_LONG, 0);
-    MPI::COMM_WORLD.Bcast(&times, 1, MPI::UNSIGNED_LONG, 0);
-    MPI::COMM_WORLD.Bcast(&header_length, 1, MPI::UNSIGNED_LONG, 0);
+    // Distribute the history file properties to the other processes
+    mpiComm.Bcast(&nodes, 1, MPI::UNSIGNED_LONG, 0);
+    mpiComm.Bcast(&times, 1, MPI::UNSIGNED_LONG, 0);
+    mpiComm.Bcast(&header_length, 1, MPI::UNSIGNED_LONG, 0);
 #endif
 
     // Initialize the netCDF file
@@ -237,7 +243,9 @@ int main(int argc, char *argv[]) {
         // The number of state variables
         unsigned int our_state_vars = ((i + 1 == input_files.size()) && last_is_bottom?
                 statevars_bottom : statevars);
-        // The byte size per time block
+        // The byte size per time block, recomputed from earlier to allow
+        // for the possibility that the number of state variables in this
+        // file is different
         size_t bytes_per_time = header_length + BYTES_PER_FLOAT * nodes * our_state_vars;
 
         level.open(input_files[i]);
@@ -260,14 +268,26 @@ int main(int argc, char *argv[]) {
               time << "... " << std::flush;
           }
 
+          // Initialize a read buffer to store (# nodes) floats for
+          // a single state variable
           const size_t bytes_per_statevar = BYTES_PER_FLOAT * nodes;
           char *buffer = new char[bytes_per_statevar];
 
           // Convert time from days to seconds in the cdf so it's
           // consistent with the native netcdf output
           timeVar.putVar({t}, time * 86400);
+
+          // Read only the data we want to output to the NetCDF file.
+          // We can do this by seeking within the file to locations where
+          // we know this data can be found, rather than parsing the
+          // entire time block.
           for(size_t j = 0; j < output_indices.size(); ++j) {
             size_t data_index = output_indices[j];
+            // Skip over:
+            // all previous time blocks (t * bytes_per_time)
+            // this time block's header (header_length)
+            // all the state variables preceding the current index
+            //   (data_index * bytes_per_statevar)
             level.seekg(t * bytes_per_time + header_length +
                 data_index * bytes_per_statevar);
             level.read(buffer, bytes_per_statevar);
@@ -275,7 +295,9 @@ int main(int argc, char *argv[]) {
               // FIXME more informative error
               throw "Error reading enough bytes for an output index";
             }
-            // See https://www.boost.org/doc/libs/1_71_0/libs/spirit/doc/html/spirit/support/line_pos_iterator.html
+            // Connect Spirit-compatible iterators to the buffer for
+            // parsing. See
+            // https://www.boost.org/doc/libs/1_71_0/libs/spirit/doc/html/spirit/support/line_pos_iterator.html
             spirit::line_pos_iterator<char*> begin(buffer), end(buffer + bytes_per_statevar);
             std::vector<float> data;
             if(! parse_statevar(begin, end, nodes, data)) {
@@ -285,7 +307,6 @@ int main(int argc, char *argv[]) {
               throw "Parse did not complete (" + std::to_string(data.size()) + " nodes)";
             }
 
-            // Save the data to the CDF
             netCDF::NcVar v = allVars[j];
             // Write this variable at all the cells in this layer at this
             // time
@@ -298,7 +319,7 @@ int main(int argc, char *argv[]) {
 #ifdef PARALLEL
         // Let all the processes catch up before moving on to the next
         // file
-        MPI::COMM_WORLD.Barrier();
+        mpiComm.Barrier();
 #endif
         level.close();
       } catch(std::ifstream::failure&) {
@@ -315,7 +336,7 @@ int main(int argc, char *argv[]) {
     MPI::Finalize();
   } catch(MPI::Exception& e) {
     std::cout << "MPI error: " << e.Get_error_string() << std::endl;
-    MPI::COMM_WORLD.Abort(-1);
+    mpiComm.Abort(-1);
 #endif
   } catch(netCDF::exceptions::NcException& e) {
     std::cerr << e.what() << std::endl;
