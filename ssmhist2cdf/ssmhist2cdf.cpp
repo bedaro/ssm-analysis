@@ -113,6 +113,14 @@ size_t read_header(std::ifstream& f, float& time, size_t& nodes) {
 int main(int argc, char *argv[]) {
   int rank = -1;
   float time = 0;
+#ifndef PARALLEL
+  rank = 0;
+  const int procs = 1;
+#else
+  MPI::Init(argc, argv);
+  rank = MPI::COMM_WORLD.Get_rank();
+  const int procs = MPI::COMM_WORLD.Get_size();
+#endif
 
   po::options_description desc("Allowed options");
   desc.add_options()
@@ -140,16 +148,18 @@ int main(int argc, char *argv[]) {
               options(desc).positional(p).run(), vm);
 
     // Fix from https://stackoverflow.com/a/5517755
-    if(vm.count("help")) {
+    if(vm.count("help") && (rank == 0)) {
       std::cout << USAGE << std::endl << desc << std::endl;
-      return 0;
+      abort(0);
     }
 
     po::notify(vm);
   } catch (boost::program_options::error& e) {
-    std::cerr << USAGE << std::endl
-              << "Try ssmhist2cdf --help" << std::endl;
-    return 1;
+    if(rank == 0) {
+      std::cerr << USAGE << std::endl
+                << "Try ssmhist2cdf --help" << std::endl;
+    }
+    abort(1);
   }
 
   const std::vector<std::string> input_files =
@@ -164,14 +174,8 @@ int main(int argc, char *argv[]) {
 
   try {
 #ifndef PARALLEL
-    rank = 0;
-    const int procs = 1;
     netCDF::NcFile ncFile(output_file, netCDF::NcFile::newFile);
 #else
-    MPI::Init();
-    rank = MPI::COMM_WORLD.Get_rank();
-    const int procs = MPI::COMM_WORLD.Get_size();
-
     verbose &= (rank == 0);
     if(verbose) {
       std::cout << "Running in parallel, " << procs << " processes" << std::endl;

@@ -8,8 +8,8 @@ TARGETS := ssmhist2cdf
 OBJS := ssmhist2cdf.o
 
 ifdef PARALLEL
-	CXXFLAGS += $(shell pkg-config --cflags ompi-cxx) -DPARALLEL
-	LIBS += $(shell pkg-config --libs ompi-cxx)
+	CXX := mpicxx
+	CXXFLAGS += -DPARALLEL
 
 	OBJS += parNcFile.o
 endif
