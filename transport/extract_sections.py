@@ -233,9 +233,6 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
 
         outds.close()
 
-    print(sections['AdmInlet2']['eles'])
-    #print(sections['AdmInlet2']['n'])
-
     # Attempts to use the entire MFDataset don't seem to scale well.
     # Instead, I'm resorting to a blocking approach where MFDatasets are
     # created for only a few netCDF files at a time
