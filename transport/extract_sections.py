@@ -4,7 +4,8 @@ Extracts fields at a number of sections which may be used later for TEF
 analysis of transport and transport-weighted properties.
 
 This script is based heavily on Parker MacCready's x_tef/extract_sections.py
-for LiveOcean and has many of the same options.
+for LiveOcean and has many of the same options. The plot output is based, in
+part, on Parker's x_tef/plot_physical_section.py
 
 TODO
 - A --cache option like rawcdf_extract so files are read/written in TMPDIR
@@ -19,6 +20,7 @@ import time
 from datetime import datetime
 import os
 import logging
+import requests
 from dataclasses import dataclass, field
 from argparse import ArgumentParser, Namespace
 from configparser import ConfigParser
@@ -34,6 +36,7 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 from adjustText import adjust_text
 import matplotlib.patheffects as pe
+from matplotlib import ticker
 import contextily as cx
 
 root_logger = logging.getLogger()
@@ -80,6 +83,15 @@ class FvcomGrid:
         """Calculate the distance between the two given elements"""
         xc,yc = tuple(self.elcoord[(0,1),:])
         return np.sqrt((xc[el2-1]-xc[el1-1])**2+(yc[el2-1]-yc[el1-1])**2)
+
+    def elements_gdf(self):
+        """Create a GeoDataFrame of all the elements
+
+        FIXME make the CRS an argument or class property"""
+        els = []
+        for ns in self.nv.swapaxes(1, 0):
+            els.append(Polygon([self.ncoord[:,n-1] for n in ns]))
+        return gpd.GeoDataFrame({"geometry": els}, crs='epsg:32610')
 
     def _meaner(b, a):
         return a[:, b].mean(axis=1)
@@ -151,8 +163,9 @@ def main():
     config = ConfigParser()
     config.read(args.sectionsfile)
 
-    if not os.path.isdir(args.outdir):
-        os.mkdir(args.outdir)
+    root = EXTRACTION_ROOT_DIR.format(outdir=args.outdir)
+    if not os.path.isdir(root):
+        os.mkdir(root)
 
     MAX_JOBS = args.max_jobs
 
@@ -161,6 +174,11 @@ def main():
 def sect_linestr(name, sect):
     """Build a LineString object from the X and Y values in sect"""
     return [name, LineString([(x, y) for x, y in zip(sect['x'], sect['y'])])]
+
+EXTRACTION_ROOT_DIR = 'LiveOcean_output/tef/{outdir}'
+EXTRACTION_OUT_PATH = EXTRACTION_ROOT_DIR + '/extractions/{name}.nc'
+PLOT_ROOT_DIR = EXTRACTION_ROOT_DIR + '/physical_section_plots'
+PLOT_PATH = PLOT_ROOT_DIR + '/{name}/{plot}.png'
 
 def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
     logger = root_logger.getChild('do_extract')
@@ -176,12 +194,6 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
     elapsed = (time.perf_counter() - sect_start)
     total_eles = np.sum([len(s["eles"]) for n,s in sections.items()])
     logger.info(f'Found {len(sections)} sections, {total_eles} elements to extract in {int(elapsed)} secs')
-
-    if args.make_plots:
-        logger.info("Generating plots")
-        make_plots(indata['nv'][:].astype(int), indata['x'][:],
-                indata['y'][:], indata['siglev'][:], sections, output_dir)
-        logger.info("Plot generation complete")
 
     logger.info("Determining scope of work")
     sd = datetime.strptime(args.output_start_date, '%Y.%m.%d')
@@ -218,8 +230,11 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
             crs='epsg:32610').set_index('name').to_crs('epsg:4326')
 
     for name,section in sections.items():
-        out_fn = output_dir + "/" + name + ".nc"
         meta['section_name'] = name
+        out_fn = EXTRACTION_OUT_PATH.format(outdir=output_dir, name=name)
+        out_dir = os.path.dirname(out_fn)
+        if not os.path.isdir(out_dir):
+            os.mkdir(out_dir)
 
         latlons = np.array(section_eles_gdf.loc[name, "geometry"].coords)
         outds = start_netcdf(indata, out_fn, len(time_range),
@@ -236,7 +251,6 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
     # Attempts to use the entire MFDataset don't seem to scale well.
     # Instead, I'm resorting to a blocking approach where MFDatasets are
     # created for only a few netCDF files at a time
-    indata.close()
     i = 0
     total = 0
     logger.info("Extracting sections...")
@@ -267,6 +281,15 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
         logger.info("{0}/{1} ({2}s elapsed, {3}s to go, {4}KBps)".format(i,
             times_ct, int(elapsed), int(to_go), int(total/elapsed/1000)))
 
+    if args.make_plots:
+        logger.info("Generating plots")
+        start_time = time.perf_counter()
+        make_plots(indata, sections, output_dir)
+        elapsed = time.perf_counter() - start_time
+        logger.info(f'Plot generation completed in {elapsed} secs')
+    indata.close()
+
+
 def copy_data(name, section, infiles, time_range, output_dir):
     indata = MFDataset(infiles) if len(infiles) > 1 else Dataset(infiles[0])
     bytes_written = 0
@@ -277,7 +300,7 @@ def copy_data(name, section, infiles, time_range, output_dir):
             (indata['time'][:] == times_in[0]).nonzero()[0][0],
             (indata['time'][:] == times_in[-1]).nonzero()[0][0]+1)
 
-    out_fn = output_dir + "/" + name + ".nc"
+    out_fn = EXTRACTION_OUT_PATH.format(outdir=output_dir, name=name)
     outds = Dataset(out_fn, 'a')
 
     tout_slc = slice(
@@ -314,7 +337,6 @@ def copy_data(name, section, infiles, time_range, output_dir):
         # Calculate u dot n (transport flux in m/s)
         u = indata['u'][tin_slc,:,ele-1]
         v = indata['v'][tin_slc,:,ele-1]
-        #tf = np.dot(np.transpose([u, v], axes=(1,2,0)), n)
         tf = u * n[0] + v * n[1]
 
         # Calculate q = tf times DA0
@@ -347,10 +369,14 @@ def find_sections(indata, sects_config):
                 [(n, sects_config[n]) for n in sects_config.sections()])
     return dict(zip(sects_config.sections(), sections_list))
 
-# This is the meat of the processing, and is based heavily on Ted Conroy's
-# version of an FVCOM transport calculator Matlab script
-# (https://github.com/tedconroy/ocean-model-codes/blob/master/fvcom/fvcom_calcfluxsect.m)
 def build_section(name, config, grid, z, zz, ele_adj_dict):
+    """Do all the unstructured grid math to identify the geometry of a transect
+
+    This is the meat of the processing, and is based heavily on Ted Conroy's
+    version of an FVCOM transport calculator Matlab script
+    (https://github.com/tedconroy/ocean-model-codes/blob/master/fvcom/fvcom_calcfluxsect.m)
+    """
+
     logger = root_logger.getChild('build_section')
 
     G = nx.Graph(ele_adj_dict)
@@ -447,10 +473,15 @@ def build_section(name, config, grid, z, zz, ele_adj_dict):
         "da0": da0
     }
 
-# This is almost identical to Parker MacCready's start_netcdf function
-# in x_tef/tef_fun.py with a few tweaks to copy variables/dimensions from
-# an FVCOM NetCDF file
+
 def start_netcdf(ds, out_fn, NT, NX, NZ, Lon, Lat, Ldir, vn_list=('salt',)):
+    """Create a NetCDF file for the extraction results.
+
+    This is almost identical to Parker MacCready's start_netcdf function
+    in x_tef/tef_fun.py with a few tweaks to copy variables/dimensions from
+    an FVCOM NetCDF file.
+    """
+
     try: # get rid of the existing version
         os.remove(out_fn)
     except OSError:
@@ -529,73 +560,200 @@ def start_netcdf(ds, out_fn, NT, NX, NZ, Lon, Lat, Ldir, vn_list=('salt',)):
 
     return foo
 
-def make_plots(nv, x, y, siglevs, sections, outdir):
-    """Make model grid and profile plots"""
-
-    # Create a GeoDataFrame of all the elements
-    els = []
-    for ns in nv.swapaxes(1, 0):
-        els.append(Polygon([(x[n-1], y[n-1]) for n in ns]))
-    domain_gdf = gpd.GeoDataFrame({"geometry": els}, crs='epsg:32610')
-    
-    # Create another GeoDataFrame for all the sections as LineStrings
-    all_x = []
-    all_y = []
-    names = []
-    geoms = []
-    for name,sect in sections.items():
-        names.append(name)
-
-        # Interweave the x/y and xm/ym arrays
-        sect_x = np.zeros(sect['x'].size + sect['xm'].size)
-        sect_y = np.zeros_like(sect_x)
-        sect_x[0::2] = sect['xm']
-        sect_x[1::2] = sect['x']
-        sect_y[0::2] = sect['ym']
-        sect_y[1::2] = sect['y']
-        geoms.append(LineString([(x, y) for x, y in zip(sect_x, sect_y)]))
-
-        # Keep sect_x and sect_y for use with adjust_text later
-        all_x.append(sect_x)
-        all_y.append(sect_y)
-
-        # Draw the transect profile
-        fig, ax = plt.subplots(figsize=(8,6))
-        # Create a running distance for the section corners
-        dists = np.cumsum(sect['a']) / 1000
-        dists = np.concatenate(([0], dists))
-        for dleft,dright,h in zip(dists[:-1], dists[1:], sect['h']):
-            for stop,sbot in zip(siglevs[:-1], siglevs[1:]):
-                zs = h * np.array([stop, sbot, sbot, stop, stop])
-                ax.plot((dleft, dleft, dright, dright, dleft), zs, color='tab:blue')
-        ax.set(title=name, ylabel='Depth (m)', xlabel='Transect Distance (km)')
-        fig.savefig(outdir + "/section_" + name + ".png")
-        plt.close(fig)
-
-    all_x = np.concatenate(all_x)
-    all_y = np.concatenate(all_y)
-    sections_gdf = gpd.GeoDataFrame({"name": names, "geometry": geoms}, crs='epsg:32610')
-
-    # Plot all the sections in overhead view
-    fig, ax = plt.subplots(figsize=(6,8))
+def plot_locations(ax, grid, sections_gdf, sectiondata, all_x=None, all_y=None):
     p = sections_gdf.plot(ax=ax, color='tab:red', zorder=2)
     # Add up-estuary flow direction arrows
-    for name,sect in sections.items():
+    for sect in sectiondata.values():
         ax.quiver(sect['x'], sect['y'], sect['n'][:,0], sect['n'][:,1],
                 zorder=3, alpha=0.7)
     xmin, xmax, ymin, ymax = p.axis()
+    if len(sections_gdf) == 1:
+        # Zoom out a bit and adjust the aspect ratio
+        r = 0.5
+        min_ar = 0.4
+        max_ar = 1
+        min_dy = (xmax - xmin) / max_ar
+        min_dx = (ymax - ymin) * min_ar
+        if ymax - ymin < min_dy:
+            ymin += (ymax - ymin) / 2 - min_dy / 2
+            ymax += (ymax - ymin) / 2 + min_dy / 2
+        elif xmax - xmin < min_dx:
+            xmin += (xmax - xmin) / 2 - min_dx / 2
+            xmax += (xmax - xmin) / 2 + min_dx / 2
+        zoom_fact = (.5 - 1/(2*r))
+        xmin, xmax, ymin, ymax = (xmin + zoom_fact * (xmax - xmin),
+                                  xmax - zoom_fact * (xmax - xmin),
+                                  ymin + zoom_fact * (ymax - ymin),
+                                  ymax - zoom_fact * (ymax - ymin))
+    domain_gdf = grid.elements_gdf()
     domain_gdf.boundary.plot(ax=ax, alpha=0.8, zorder=1)
     ax.set(ybound=(ymin,ymax), xbound=(xmin,xmax), xticklabels=(),
-            yticklabels=(), title='All Sections')
-    cx.add_basemap(ax, crs=domain_gdf.crs)
-    texts = sections_gdf.apply(
-            lambda x: ax.annotate(x['name'], xy=x['geometry'].coords[0],
-                ha='center', va='center',
-                path_effects=[pe.withStroke(linewidth=3, foreground='white',
-                    alpha=0.6)]), axis=1)
-    adjust_text(texts, all_x, all_y, arrowprops=dict(arrowstyle='-'))
+            yticklabels=())
+    try:
+        cx.add_basemap(ax, crs=domain_gdf.crs, url=cx.providers.Stamen.TonerLite)
+    except requests.HTTPError as e:
+        # Try with a max zoom level
+        cx.add_basemap(ax, crs=domain_gdf.crs, url=cx.providers.Stamen.TonerLite, zoom=13)
+    if len(sections_gdf) > 1:
+        texts = sections_gdf.apply(
+                lambda x: ax.annotate(x['name'], xy=x['geometry'].coords[0],
+                    ha='center', va='center',
+                    path_effects=[pe.withStroke(linewidth=3, foreground='white',
+                        alpha=0.6)]), axis=1)
+        adjust_text(texts, all_x, all_y, arrowprops=dict(arrowstyle='-'))
 
-    fig.savefig(outdir + "/all_sections_map.png")
-    plt.close(fig)
+def make_plots(indata, sections, outdir):
+    """Make model grid and profile plots"""
+
+    dir_name = PLOT_ROOT_DIR.format(outdir=outdir)
+    if not os.path.isdir(dir_name):
+        os.mkdir(dir_name)
+
+    grid = FvcomGrid(np.array([indata['x'][:],indata['y'][:],indata['h'][:]]),
+            indata['nv'][:].astype(int))
+    z = indata['siglev'][:]
+
+    section_plot_nameconf = partial(make_section_plot, outdir=outdir,
+            grid=grid, z=z)
+    with Pool(MAX_JOBS) as p:
+        res = p.starmap(section_plot_nameconf,
+                sections.items())
+        names = map(lambda x: x[0], res)
+        all_x = np.concatenate([x[1] for x in res])
+        all_y = np.concatenate([x[2] for x in res])
+        sections_gdf = pd.concat([x[3] for x in res], ignore_index=True)
+
+    if len(sections) > 1:
+        # Plot all the sections in overhead view
+        fig, ax = plt.subplots(figsize=(6,8))
+        plot_locations(ax, grid, sections_gdf, sections, all_x=all_x, all_y=all_y)
+        ax.set_title("All Sections")
+        fig.savefig(dir_name + '/all_sections_map.png')
+        plt.close(fig)
+
+class SectionLocator(ticker.AutoLocator):
+    """Automatically position A and B ticks at the extreme ends of the X-axis
+    """
+    def __call__(self):
+        locs = super().__call__()
+        bounds = self.axis.get_view_interval()
+        prev_loc = np.where(locs < bounds[-1], locs, 0).argmax()
+        # Add a tick to the very edge, unless it's too close to an existing
+        # tick in which case replace the existing one
+        if bounds[-1] - locs[prev_loc] < 0.05 * (bounds[-1] - bounds[0]):
+            locs[prev_loc] = bounds[-1]
+        else:
+            locs = np.array(list(locs) + [bounds[-1]])
+        return locs
+
+class SectionFormatter(ticker.ScalarFormatter):
+    """Automatically label the extreme ticks A and B"""
+    def __call__(self, x, pos=None):
+        bounds = self.axis.get_view_interval()
+        if x == bounds[0]:
+            return 'A'
+        elif x == bounds[-1]:
+            return 'B'
+        else:
+            return super().__call__(x, pos=(None if pos is None else pos))
+
+def make_section_plot(name, sectiondata, outdir, grid, z):
+    # Interweave the x/y and xm/ym arrays
+    sect_x = np.zeros(sectiondata['x'].size + sectiondata['xm'].size)
+    sect_y = np.zeros_like(sect_x)
+    sect_x[0::2] = sectiondata['xm']
+    sect_x[1::2] = sectiondata['x']
+    sect_y[0::2] = sectiondata['ym']
+    sect_y[1::2] = sectiondata['y']
+    # Create a GeoDataFrame for the section with a LineString geometry
+    geom = LineString([(x, y) for x, y in zip(sect_x, sect_y)])
+    gdf = gpd.GeoDataFrame({'name': [name], 'geometry': [geom]},
+            crs='epsg:32610')
+
+    # Open the extraction file
+    ds = Dataset(EXTRACTION_OUT_PATH.format(outdir=outdir, name=name))
+    z0 = ds['z0'][:]
+    da0 = ds['DA0'][:]
+    # get time axis for indexing
+    ot = ds['ocean_time'][:]
+    dt = pd.Timestamp('1/1/1970 00:00') + pd.to_timedelta(ot, 'sec')
+    tind = np.arange(len(dt))
+    dt_ser = pd.Series(index=dt, data=tind)
+    # time variable fields
+    q = ds['q'][:]
+    salt = ds['salt'][:]
+    svmin = salt.mean() - 2*salt.std()
+    svmax = salt.mean() + 2*salt.std()
+
+    dir_name = os.path.dirname(PLOT_PATH.format(outdir=outdir, name=name, plot=''))
+    if not os.path.isdir(dir_name):
+        os.mkdir(dir_name)
+
+    # Compute distances between each element along the transect, for the
+    # salinity contour
+    # Start with the legs from the previous midpoint to the centroid
+    center_dists = np.sqrt((sectiondata['x'] - sectiondata['xm'][:-1]) ** 2 +
+            (sectiondata['y'] - sectiondata['ym'][:-1]) ** 2)
+    # Now add the legs from the previous centroid to the previous midpoint
+    # (for all elements after the first one)
+    center_dists[1:] += np.sqrt(
+            (sectiondata['xm'][1:-1] - sectiondata['x'][:-1]) ** 2 +
+            (sectiondata['ym'][1:-1] - sectiondata['y'][:-1]) ** 2)
+    # Create a running total
+    xsect = np.cumsum(center_dists) / 1000
+
+    # For the colormesh edges: create a running distance for the section
+    # midpoints
+    dists = np.cumsum(sectiondata['a']) / 1000
+    dists = np.concatenate(([0], dists))
+
+    # Create a 2D array for the vertical edges of each cell
+    depth_edges = z[:,np.newaxis] @ sectiondata['hm'][np.newaxis,:]
+
+    for mm,dt_mo in dt_ser.groupby(lambda i: i.month):
+        it0 = dt_mo[0]
+        it1 = dt_mo[-1]
+
+        # form time means
+        qq = q[it0:it1,:].mean(axis=0)
+        ss = salt[it0:it1,:].mean(axis=0)
+
+        fig = plt.figure(figsize=(13,8))
+
+        # Modified from Parker's code to use flat shading instead of nearest,
+        # as this produces more accurately outer edges.
+        ax = fig.add_subplot(221)
+        cs = ax.pcolormesh(dists, depth_edges, 100*qq/da0, vmin=-10, vmax=10, cmap='bwr')
+        fig.colorbar(cs)
+        ax.set(title='Mean Velocity (cm/s) Month = ' + str(mm),
+                ylabel='Depth (m)',xbound=(0,dists[-1]), xticklabels=())
+        ax.xaxis.set_major_locator(SectionLocator())
+
+        ax = fig.add_subplot(223)
+        cs = ax.pcolormesh(dists, depth_edges, ss, vmin =svmin, vmax=svmax, cmap='rainbow')
+        fig.colorbar(cs)
+        contour_interval = .2
+        ax.contour(xsect*np.ones((z0.shape[0],1)), z0, ss,
+            np.arange(0,35,contour_interval), colors='black', linewidths=.4)
+        ax.set(title='Mean Salinity (C.I. = %0.1f)' % (contour_interval),
+            xlabel='Transect Distance (km)', ylabel='Depth (m)',
+            xbound=(0,dists[-1]))
+        ax.xaxis.set_major_locator(SectionLocator())
+        ax.xaxis.set_major_formatter(SectionFormatter())
+
+        # Add section location map
+        ax = fig.add_subplot(122)
+        plot_locations(ax, grid, gdf, {name: sectiondata})
+        for lbl,x,y in zip(('A','B'),sectiondata['xm'][[0,-1]],sectiondata['ym'][[0,-1]]):
+            ax.annotate(lbl, xy=(x, y), ha='center', va='center',
+                    path_effects=[pe.withStroke(linewidth=3, foreground='white',
+                        alpha=0.6)])
+        nnnn = ('0000' + str(mm))[-4:]
+        plotname = 'plot_' + nnnn
+        fig.savefig(PLOT_PATH.format(outdir=outdir, name=name, plot=plotname))
+        plt.close(fig)
+
+    ds.close()
+    return name, sect_x, sect_y, gdf
 
 if __name__ == "__main__": main()
