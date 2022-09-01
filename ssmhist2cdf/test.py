@@ -39,11 +39,10 @@ class TestHistCdfConversion(unittest.TestCase):
 
     # Check other variables
     def test_statevars(self):
-        self._compare_vars('DOXG',     1e-4)
-        self._compare_vars('salinity', 1e-4)
-        self._compare_vars('temp',     1e-4)
-        self._compare_vars('NO3',      1e-4)
-        self._compare_vars('PO4',      1e-4)
+        self._compare_vars('zeta', 1e-4)
+        self._compare_vars('DOXG', 1e-4)
+        self._compare_vars('NO3',  1e-4)
+        self._compare_vars('PO4',  1e-4)
 
 def main():
     global ssm_history, nc
