@@ -2,10 +2,10 @@ CXX := $(shell nc-config --cxx4)
 #OPT := -O0 -g
 OPT := -O3 -march=native -DNDEBUG
 CXXFLAGS += $(OPT) -std=c++17 -Wall $(shell nc-config --cxx4flags)
-LIBS := -Wl,-Bstatic -lboost_program_options -Wl,-Bdynamic $(shell nc-config --cxx4libs) -Wl,--as-needed
+LIBS := -Wl,-Bstatic -lboost_program_options -lyaml-cpp -Wl,-Bdynamic $(shell nc-config --cxx4libs) -Wl,--as-needed
 
 TARGETS := ssmhist2cdf
-OBJS := ssmhist2cdf.o
+OBJS := ssmhist2cdf.o assembleVars.o
 
 ifdef PARALLEL
 	CXX := mpicxx
@@ -27,5 +27,6 @@ clean:
 	/bin/rm -f $(TARGETS) *.o *~
 
 # Dependencies (hardcoded because they're quite simple)
-ssmhist2cpp.cpp: parNcFile.h
+ssmhist2cpp.cpp: parNcFile.h assembleVars.h
 parNcFile.cpp: parNcFile.h
+assembleVars.cpp: assembleVars.h

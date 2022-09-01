@@ -2,6 +2,8 @@
 #include <fstream>
 #include <filesystem> // Requires C++17
 #include <vector>
+#include <map>
+#include <algorithm>
 #include <netcdf>
 #include <boost/spirit/include/qi.hpp>
 #include <boost/spirit/include/qi_repeat.hpp>
@@ -10,6 +12,8 @@
 #include <boost/spirit/include/phoenix_stl.hpp>
 #include <boost/spirit/include/support_line_pos_iterator.hpp>
 #include <boost/program_options.hpp>
+#include <yaml-cpp/yaml.h>
+#include "assembleVars.h"
 #ifdef PARALLEL
   #include <mpi.h>
   #include "parNcFile.h"
@@ -19,13 +23,11 @@
     #error "OpenMPI C++ bindings are missing, cannot compile"
   #endif
 
-  #define abort(val) MPI::COMM_WORLD.Abort(-1)
+  #define abort(val) MPI::COMM_WORLD.Abort(val == 0? 0: -1)
 #else
   #define abort(val) return val
 #endif
 
-#define STATEVARS 42
-#define STATEVARS_BOTTOM 94
 #define FILE_VER 4 // The hardcoded integer present in the header
 #define BYTES_PER_FLOAT 15 // The size of each float field. The first
                            // one on each line is one shorter which
@@ -33,31 +35,51 @@
 
 #define USAGE "Usage: ssmhist2cdf [options] output-file input-file [input-file ...]"
 
-// depth is at index 3
-// DO is at index 4
-// lDOC is at index 5
-// Alg1 is at index 6
-// Alg2 is at index 7
-// NH4 is at index 8
-// NO3 is at index 9
-// PO4 is at index 10
-// Temp is at index 12
-// Salt is at index 13
-// rDOC is at index 15
-// lPOC is at index 16
-// rPOC is at index 17
-// DIC is at index 20
-// TALK is at index 21
-// pH is at index 22
-// pCO2 is at index 23
-
-static const std::array<int, 17> output_indices({
-  3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 15, 16, 17, 20, 21, 22, 23
-});
-static const std::array<std::string, 17> output_variables({
-  "depth", "DOXG", "LDOC", "B1", "B2", "NH4", "NO3", "PO4", "temp",
-  "salinity", "RDOC", "LPOC", "RPOC", "TDIC", "TALK", "pH", "pCO2"
-});
+// Default configuration
+static const std::string default_variables =
+  "state_vars: 42\n"
+  "state_vars_bottom: 94\n"
+  "output_indices:\n"
+  "  0:\n"
+  "    variable: 'h'\n"
+  "    long_name: 'bathymetry'\n"
+  "    units: 'meters'\n"
+  "    positive: 'down'\n"
+  "    per_layer: false\n"
+  "  1:\n"
+  "    variable: 'zeta'\n"
+  "    long_name: 'Water Surface Elevation'\n"
+  "    units: 'meters'\n"
+  "    positive: 'up'\n"
+  "    per_layer: false\n"
+  "  3:\n"
+  "    variable: 'depth'\n"
+  "    long_name: 'depth'\n"
+  "    units: 'meters'\n"
+  "  4:\n"
+  "    variable: 'DOXG'\n"
+  "    long_name: 'dissolved oxygen'\n"
+  "    units: 'MG/L'\n"
+  "  6:\n"
+  "    variable: 'B1'\n"
+  "    long_name: 'algal group 1'\n"
+  "    units: 'gC meters-3'\n"
+  "  7:\n"
+  "    variable: 'B2'\n"
+  "    long_name: 'algal group 2'\n"
+  "    units: 'gC meters-3'\n"
+  "  8:\n"
+  "    variable: 'NH4'\n"
+  "    long_name: 'ammonia'\n"
+  "    units: 'gN meters-3'\n"
+  "  9:\n"
+  "    variable: 'NO3'\n"
+  "    long_name: 'nitrate+nitrite'\n"
+  "    units: 'gN meters-3'\n"
+  "  10:\n"
+  "    variable: 'PO4'\n"
+  "    long_name: 'phosphate'\n"
+  "    units: 'gP meters-3'\n";
 
 namespace spirit = boost::spirit;
 namespace po = boost::program_options;
@@ -134,11 +156,8 @@ int main(int argc, char *argv[]) {
     ("last-is-bottom",
         "treat the last file as the bottom layer with sediment state "
         "variables")
-    ("state-vars", po::value<unsigned int>()->default_value(STATEVARS),
-        "Number of state variables per cell")
-    ("state-vars-bottom",
-        po::value<unsigned int>()->default_value(STATEVARS_BOTTOM),
-        "Number of state variables per cell on the bottom")
+    ("config,c", po::value<std::string>(),
+        "Specify a config file with the output variables")
     ("verbose,v", "Verbose output")
     ("output-file", po::value<std::string>()->required(),
         "Output netcdf file name")
@@ -168,13 +187,23 @@ int main(int argc, char *argv[]) {
     abort(1);
   }
 
+  YAML::Node config;
+  if(vm.count("config")) {
+#ifndef NDEBUG
+    std::cout << "Reading configuration from " << vm["config"].as<std::string>() << std::endl;
+#endif
+    config = YAML::LoadFile(vm["config"].as<std::string>());
+  } else {
+    config = YAML::Load(default_variables);
+  }
+
   const std::vector<std::string> input_files =
       vm["input-file"].as< std::vector<std::string> >();
   const std::string output_file = vm["output-file"].as<std::string>();
   const bool last_is_bottom = vm.count("last-is-bottom");
   bool verbose = vm.count("verbose");
-  const unsigned int statevars = vm["state-vars"].as<unsigned int>(),
-      statevars_bottom = vm["state-vars-bottom"].as<unsigned int>();
+  const unsigned int statevars = config["state_vars"].as<unsigned int>(),
+      statevars_bottom = config["state_vars_bottom"].as<unsigned int>();
   // Field width of input file index
   int input_w = std::ceil(std::log10(input_files.size() + 1));
 
@@ -195,7 +224,6 @@ int main(int argc, char *argv[]) {
 
     unsigned long nodes, times, header_length;
     netCDF::NcDim timeDim, sigmaDim, cellDim;
-    std::vector<netCDF::NcDim> allDims(3);
     std::ifstream level;
     level.exceptions(std::ifstream::failbit|std::ifstream::badbit);
 
@@ -229,14 +257,9 @@ int main(int argc, char *argv[]) {
     netCDF::NcVar timeVar = ncFile.addVar("time", netCDF::NcType::nc_FLOAT,
         timeDim);
 
-    allDims[0] = timeDim;
-    allDims[1] = sigmaDim;
-    allDims[2] = cellDim;
-    std::vector<netCDF::NcVar> allVars(output_variables.size());
-    for(size_t j = 0; j < output_variables.size(); ++j) {
-      allVars[j] = ncFile.addVar(output_variables[j],
-                                 netCDF::NcType::nc_FLOAT, allDims);
-    }
+    // allVars will be a map of all the output variables, keyed by
+    // offset in the history file
+    std::map<size_t, netCDF::NcVar> allVars = assembleVars(ncFile, config);
 
     for(size_t i = 0; i < input_files.size(); ++i) {
       try {
@@ -281,8 +304,24 @@ int main(int argc, char *argv[]) {
           // We can do this by seeking within the file to locations where
           // we know this data can be found, rather than parsing the
           // entire time block.
-          for(size_t j = 0; j < output_indices.size(); ++j) {
-            size_t data_index = output_indices[j];
+          for(auto& [data_index, v] : allVars) {
+            bool has_time = true, has_sigma = true;
+            // Only extract time-independent data in the first timestep
+            if(v.getDim(0) != timeDim) {
+              if(t > 0) {
+                continue;
+              }
+              has_time = false;
+            }
+            // Only extract depth-independent data in the first layer file
+            std::vector<netCDF::NcDim> dims = v.getDims();
+            if(std::find(dims.begin(), dims.end(), sigmaDim) == dims.end()) {
+              if(i > 0) {
+                continue;
+              }
+              has_sigma = false;
+            }
+
             // Skip over:
             // all previous time blocks (t * bytes_per_time)
             // this time block's header (header_length)
@@ -307,10 +346,20 @@ int main(int argc, char *argv[]) {
               throw "Parse did not complete (" + std::to_string(data.size()) + " nodes)";
             }
 
-            netCDF::NcVar v = allVars[j];
-            // Write this variable at all the cells in this layer at this
-            // time
-            v.putVar({t, i, 0}, {1, 1, nodes}, data.data());
+            if(has_time && has_sigma) {
+              // Write this variable at all the cells in this layer at this
+              // time
+              v.putVar({t, i, 0}, {1, 1, nodes}, data.data());
+            } else if(has_time) {
+              // No sigma info
+              v.putVar({t, 0}, {1, nodes}, data.data());
+            } else if(has_sigma) {
+              // No time info
+              v.putVar({i, 0}, {1, nodes}, data.data());
+            } else {
+              // No time or sigma info; one dimensional data
+              v.putVar({0}, {nodes}, data.data());
+            }
           }
           if(verbose) {
             std::cout << " complete." << std::endl;

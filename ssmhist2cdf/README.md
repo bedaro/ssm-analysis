@@ -3,12 +3,29 @@ file with a format intended to match the one the SSM can create, although not
 every variable from the history files is copied over.
 
 To compile: the NetCDF C++ library is required along with
-libboost_program_options. Type `make`.
+libboost_program_options and [libyaml-cpp](https://github.com/jbeder/yaml-cpp).
+Type `make`.
 
 The program can be built with parallel support using the OpenMPI C++ API.
 The NetCDF library will also need to be built with parallel support. To get
 this, type `PARALLEL=1 make`. My measurements show speedups of about 3 with 16
 cores, so it's not much but it can be helpful.
+
+```
+Usage: ssmhist2cdf [options] output-file input-file [input-file ...]
+Allowed options:
+  -h [ --help ]         produce help message
+  --last-is-bottom      treat the last file as the bottom layer with sediment 
+                        state variables
+  -c [ --config ] arg   Specify a config file with the output variables
+  -v [ --verbose ]      Verbose output
+  --output-file arg     Output netcdf file name
+  --input-file arg      Input SSM history file(s) in layer order
+```
+
+The program uses some sane defaults on which fields to extract, but these
+can be customized by using a YAML config file passed to the program with the
+-c option. The included `history.yml` is a sample of the required format.
 
 To test: the included test.py script will run ssmhist2cdf. It requires that
 you first run the water quality model for some length of time (1-3 days is
