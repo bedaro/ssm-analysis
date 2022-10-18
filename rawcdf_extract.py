@@ -67,15 +67,26 @@ def init_output(output_cdf, indata, nodes, **kwargs):
 def append_output(output_cdf):
     return Dataset(output_cdf, 'a')
 
+def get_var_name(prefix, var, attr):
+    out_name = prefix + var
+    if attr != InputAttr.ALL:
+        out_name += '_' + list(attr_strings.keys())[
+                list(attr_strings.values()).index(attr)]
+    return out_name
+
 def init_output_vars(output, **kwargs):
     args = Namespace(**kwargs)
     for var, attr in args.input_vars:
-        out_name = args.outprefix + var
-        if attr == InputAttr.BOTTOM:
-            out_name += "_bottom"
-        # TODO handle photic case
+        out_name = get_var_name(args.outprefix, var, attr)
         dims = ('time','siglay','node') if attr == InputAttr.ALL else ('time','node')
-        output.createVariable(out_name, 'f4', dims)
+        if out_name in output.variables:
+            if not args.force_overwrite:
+                raise Exception(f'Output variable {out_name} exists. Use --force-overwrite to use anyway')
+            if output[out_name].dimensions != dims:
+                raise Exception(f'Output variable {out_name} has wrong dimensions {output[out_name].dimensions}\nbut I think it should have dimensions {dims}. Cannot continue.')
+            # If we get here the variable is already present and looks fine
+        else:
+            output.createVariable(out_name, 'f4', dims)
 
 # Gotten from https://stackoverflow.com/questions/312443/how-do-you-split-a-list-or-iterable-into-evenly-sized-chunks
 def chunks(lst, n):
@@ -86,11 +97,17 @@ def chunks(lst, n):
 class InputAttr(Enum):
     ALL = 0
     BOTTOM = 1
+    MAX = 2
+    MIN = 3
+    MEAN = 4
     # TODO add "photic" for the photic zone
 
 attr_strings = {
     "all": InputAttr.ALL,
-    "bottom": InputAttr.BOTTOM
+    "bottom": InputAttr.BOTTOM,
+    "min": InputAttr.MIN,
+    "max": InputAttr.MAX,
+    "mean": InputAttr.MEAN
 }
 
 # Expands an input variable argument into a variable name and an attribute
@@ -120,6 +137,8 @@ def main():
             help="Process this many CDF files at once")
     parser.add_argument("--cache", dest="cache", action="store_true",
             help="Use a read/write cache in a temporary directory")
+    parser.add_argument("--force-overwrite", action="store_true",
+            help="Force overwriting of an existing output variable")
     # Cannot include default values of lists here, see
     # https://bugs.python.org/issue16399
     parser.set_defaults(chunk_size=4, verbose=False,
@@ -201,16 +220,21 @@ def copy_data(cdfin, cdfout, timeidx, node_ids, **kwargs):
         alldata['zeta'] = cdfin['zeta'][:, node_ids - 1]
         cdfout['zeta'][timeidx:timeidx + times_ct, :] = alldata['zeta']
     for var, attr in args.input_vars:
-        out_name = args.outprefix + var
-        if attr == InputAttr.ALL:
-            slc = slice(None)
-        elif attr == InputAttr.BOTTOM:
+        out_name = get_var_name(args.outprefix, var, attr)
+        if attr == InputAttr.BOTTOM:
             slc = -1
-            out_name += "_bottom"
-        # TODO add "photic" case which will look rather different
+        else:
+            slc = slice(None)
         data = cdfin[var][:, slc, node_ids - 1]
+        # TODO add "photic" case which will look rather different
+        if attr == InputAttr.MIN:
+            data = data.min(axis=1)
+        elif attr == InputAttr.MAX:
+            data = data.max(axis=1)
+        elif attr == InputAttr.MEAN:
+            data = data.mean(axis=1)
         logger.debug("data is shape " + str(data.shape))
-        if attr == InputAttr.ALL:
+        if len(cdfout[out_name].dimensions) == 3:
             cdfout[out_name][timeidx:timeidx+times_ct,:,:] = data
         else:
             cdfout[out_name][timeidx:timeidx+times_ct,:] = data
