@@ -29,15 +29,23 @@ def get_node_ids(shps, masked):
     logger.debug("get_node_ids found {0} nodes in {1} shapefiles".format(
         len(merged), len(shps)))
 
-    masked_nodes = np.loadtxt(masked)
+    masked_nodes = np.loadtxt(masked).astype(np.int64)
     merged = merged.difference(masked_nodes)
-    logger.debug("{0} nodes left after masking".format(len(merged)))
+    logger.info("Found {0} nodes to extract after masking".format(len(merged)))
 
     return merged.to_numpy()
 
 DEFAULT_SIGLAYERS = [-0.01581139, -0.06053274, -0.12687974, -0.20864949,
                   -0.30326778, -0.40915567, -0.52520996, -0.65060186,
                   -0.78467834, -0.9269075 ]
+
+def copy_ncatts(inds, invar, outvar):
+    # some variables are different between files in a MFDataset so we need
+    # to access a private attribute to get the right attributes dict
+    if isinstance(inds, MFDataset) and '_mastervar' in inds[invar].__dict__:
+        outvar.setncatts(inds[invar]._mastervar.__dict__)
+    else:
+        outvar.setncatts(inds[invar].__dict__)
 
 def init_output(output_cdf, indata, nodes, **kwargs):
     args = Namespace(**kwargs)
@@ -46,7 +54,12 @@ def init_output(output_cdf, indata, nodes, **kwargs):
     nodeDim = output.createDimension('node', len(nodes))
     nodeVar = output.createVariable('node', "i4", ('node',))
     output['node'][:] = nodes
+    for node_v in ('h','x','y'):
+        v = output.createVariable(node_v, "f4", ('node',))
+        copy_ncatts(indata, node_v, v)
+        output[node_v][:] = indata[node_v][nodes]
     timeVar = output.createVariable('time', "f4", ('time',))
+    copy_ncatts(indata, 'time', timeVar)
     # Iterate over all output variables
     # If an extraction attribute is "all":
     # - add the 'siglay' dimension to the output if it's not already present
@@ -56,10 +69,13 @@ def init_output(output_cdf, indata, nodes, **kwargs):
         if attr == InputAttr.ALL:
             siglayers = indata['siglay'][:] if 'siglay' in indata.variables else DEFAULT_SIGLAYERS
             output.createDimension('siglay', len(siglayers))
-            output.createVariable('siglay', 'f4', ('siglay',))
+            v = output.createVariable('siglay', 'f4', ('siglay',))
+            if 'siglay' in indata.variables:
+                copy_ncatts(indata, 'siglay', v)
             output['siglay'][:] = siglayers
             if 'zeta' in indata.variables:
-                output.createVariable('zeta', 'f4', ('time','node'))
+                v = output.createVariable('zeta', 'f4', ('time','node'))
+                copy_ncatts(indata, 'zeta', v)
             break
 
     return output
@@ -74,7 +90,7 @@ def get_var_name(prefix, var, attr):
                 list(attr_strings.values()).index(attr)]
     return out_name
 
-def init_output_vars(output, **kwargs):
+def init_output_vars(output, indata, **kwargs):
     args = Namespace(**kwargs)
     for var, attr in args.input_vars:
         out_name = get_var_name(args.outprefix, var, attr)
@@ -86,7 +102,8 @@ def init_output_vars(output, **kwargs):
                 raise Exception(f'Output variable {out_name} has wrong dimensions {output[out_name].dimensions}\nbut I think it should have dimensions {dims}. Cannot continue.')
             # If we get here the variable is already present and looks fine
         else:
-            output.createVariable(out_name, 'f4', dims)
+            v = output.createVariable(out_name, 'f4', dims)
+            copy_ncatts(indata, var, v)
 
 # Gotten from https://stackoverflow.com/questions/312443/how-do-you-split-a-list-or-iterable-into-evenly-sized-chunks
 def chunks(lst, n):
@@ -175,16 +192,18 @@ def main():
 
 def do_extract(exist_cdfs, output_cdf, **kwargs):
     args = Namespace(**kwargs)
-    logger.info("Determining scope of work...")
     indata = MFDataset(exist_cdfs) if len(exist_cdfs) > 1 else Dataset(exist_cdfs[0])
-    node_ids = get_node_ids(args.domain_node_shapefiles, args.masked_nodes_file)
-    logger.info("Initializing output file...")
     if not os.path.exists(output_cdf):
+        logger.info("Determining scope of work...")
+        node_ids = get_node_ids(args.domain_node_shapefiles, args.masked_nodes_file)
+        logger.info("Initializing output file...")
         outdata = init_output(output_cdf, indata, node_ids, **vars(args))
         outdata['time'][:] = indata['time'][:] / 3600 / 24
     else:
+        logger.info("Opening existing output file...")
         outdata = append_output(output_cdf)
-    init_output_vars(outdata, **vars(args))
+        node_ids = outdata['node'][:]
+    init_output_vars(outdata, indata, **vars(args))
 
     # Attempts to use the entire MFDataset don't seem to scale well.
     # Instead, I'm resorting to a blocking approach where MFDatasets are
