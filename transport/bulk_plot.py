@@ -133,13 +133,13 @@ for snp in sect_list:
     tef_df.loc[:,'Qout']=Qout
     tef_df.loc[:,'Sin']=Sin
     tef_df.loc[:,'Sout']=Sout
+    tef_df.to_csv(outdir + sn + '.csv')
     tef_mean_df = tef_df.resample('1M').mean()
     # the above puts timestamps at the end of the month
     # so here we set it to the middle of each month becasue it is more
     # consistent with the averaging
     tef_mean_df.index -= timedelta(days=15)
     tef_mean_df.loc[:,'yd'] = tef_mean_df.index.dayofyear
-    
 
     # PLOTTING
     fig = plt.figure(figsize=(21,9))
