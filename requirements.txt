@@ -6,3 +6,7 @@ py2dm ~= 0.2
 openpyxl
 pygeos
 cmocean
+sqlalchemy
+psycopg2
+contextily
+adjust_text
