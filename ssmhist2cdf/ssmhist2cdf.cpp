@@ -260,6 +260,10 @@ int main(int argc, char *argv[]) {
     // allVars will be a map of all the output variables, keyed by
     // offset in the history file
     std::map<size_t, netCDF::NcVar> allVars = assembleVars(ncFile, config);
+    // This array tracks where variables without depth dependence are first
+    // found. Sediment variables are only in
+    // the last file so we may have to keep checking for them
+    std::map<size_t, size_t> vars_found;
 
     for(size_t i = 0; i < input_files.size(); ++i) {
       try {
@@ -314,11 +318,21 @@ int main(int argc, char *argv[]) {
               has_time = false;
             }
             // Only extract depth-independent data in the first layer file
+            // where it's available
             std::vector<netCDF::NcDim> dims = v.getDims();
             if(std::find(dims.begin(), dims.end(), sigmaDim) == dims.end()) {
-              if(i > 0) {
+              if(! vars_found.contains(data_index)) { // C++20 feature
+                if(data_index + 1 > our_state_vars) {
+                  // Not available in this file
+                  continue;
+                }
+                // It's available here, so mark it
+                vars_found[data_index] = i;
+              } else if(vars_found[data_index] != i) {
+                // Already found in another layer; skip
                 continue;
               }
+              // Go ahead and extract
               has_sigma = false;
             }
 
@@ -330,10 +344,6 @@ int main(int argc, char *argv[]) {
             level.seekg(t * bytes_per_time + header_length +
                 data_index * bytes_per_statevar);
             level.read(buffer, bytes_per_statevar);
-            if(! level) {
-              // FIXME more informative error
-              throw "Error reading enough bytes for an output index";
-            }
             // Connect Spirit-compatible iterators to the buffer for
             // parsing. See
             // https://www.boost.org/doc/libs/1_71_0/libs/spirit/doc/html/spirit/support/line_pos_iterator.html
@@ -371,9 +381,10 @@ int main(int argc, char *argv[]) {
         mpiComm.Barrier();
 #endif
         level.close();
-      } catch(std::ifstream::failure&) {
+      } catch(std::ifstream::failure& e) {
         std::cerr << "Complete parsing for " << input_files[i]
             << " failed at time " << time << std::endl;
+        std::cerr << e.what() << std::endl;
         abort(1);
       } catch(char const *msg) {
         std::cerr << msg << std::endl;
@@ -396,3 +407,4 @@ int main(int argc, char *argv[]) {
   }
   return 0;
 }
+// vim: set shiftwidth=2 expandtab:

@@ -1,7 +1,7 @@
 CXX := $(shell nc-config --cxx4)
 #OPT := -O0 -g
 OPT := -O3 -march=native -DNDEBUG
-CXXFLAGS += $(OPT) -std=c++17 -Wall $(shell nc-config --cxx4flags)
+CXXFLAGS += $(OPT) -std=c++20 -Wall $(shell nc-config --cxx4flags)
 LIBS := -Wl,-Bstatic -lboost_program_options -lyaml-cpp -Wl,-Bdynamic $(shell nc-config --cxx4libs) -Wl,--as-needed
 
 TARGETS := ssmhist2cdf
