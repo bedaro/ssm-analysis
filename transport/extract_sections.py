@@ -11,9 +11,6 @@ TODO
 - A --cache option like rawcdf_extract so files are read/written in TMPDIR
 - conform output directories to Parker's naming convention so stuff doesn't
   have to be moved around afterward
-- FvcomGrid was borrowed and extended from my fvcom_restart project for editing
-  restart files. It's getting to the point where this needs to be moved to a
-  dedicated Python module that's hosted on PyPI and conda-forge
 """
 
 import time
@@ -21,7 +18,6 @@ from datetime import datetime
 import os
 import logging
 import requests
-from dataclasses import dataclass, field
 from argparse import ArgumentParser, Namespace
 from configparser import ConfigParser
 from multiprocessing import Pool
@@ -38,89 +34,9 @@ from adjustText import adjust_text
 import matplotlib.patheffects as pe
 from matplotlib import ticker
 import contextily as cx
+from fvcom import FvcomGrid
 
 root_logger = logging.getLogger()
-
-@dataclass(frozen=True)
-class FvcomGrid:
-    ncoord: np.array # 2xM or 3xM array of node coordinates
-    nv: np.array     # 3xN array of node vertices for each element
-    calc: bool = field(default=False) # Whether or not to calculate extras
-
-    def __post_init__(self):
-        # Ensure that array shapes are correct
-        assert self.nv.shape[0] == 3, f'FvcomGrid nv shape {self.nv.shape} is not (3, n)'
-        assert self.ncoord.shape[0] in (2,3), f'FvcomGrid ncoord shape {self.ncoord.shape} is not (2, m) or (3, m)'
-        # Using lru_cache won't work because then the class isn't thread-safe,
-        # and the cache won't be available across threads. So the only way
-        # to accommodate caching on a frozen dataclass is to hack it.
-        if self.calc:
-            object.__setattr__(self, "_nbe", self._el_neis())
-            object.__setattr__(self, "_elcoord", self._calc_elcoord())
-
-    @property
-    def m(self) -> int:
-        return self.ncoord.shape[1]
-
-    @property
-    def n(self) -> int:
-        return self.nv.shape[1]
-
-    @property
-    def nbe(self) -> np.array:
-        if not self.calc:
-            raise ValueError("nbe needs to be calculated at init. Pass calc=True)")
-        return self._nbe
-
-    @property
-    def elcoord(self) -> np.array:
-        """Return the coordinates (X,Y,H) of the element centers"""
-        if not self.calc:
-            raise ValueError("elcoord needs to be calculated at init. Pass calc=True)")
-        return self._elcoord
-
-    def el_dist(self, el1, el2):
-        """Calculate the distance between the two given elements"""
-        xc,yc = tuple(self.elcoord[(0,1),:])
-        return np.sqrt((xc[el2-1]-xc[el1-1])**2+(yc[el2-1]-yc[el1-1])**2)
-
-    def elements_gdf(self):
-        """Create a GeoDataFrame of all the elements
-
-        FIXME make the CRS an argument or class property"""
-        els = []
-        for ns in self.nv.swapaxes(1, 0):
-            els.append(Polygon([self.ncoord[:,n-1] for n in ns]))
-        return gpd.GeoDataFrame({"geometry": els}, crs='epsg:32610')
-
-    def _meaner(b, a):
-        return a[:, b].mean(axis=1)
-
-    def _calc_elcoord(self):
-        # Calculating the centroid values takes a long time without making it
-        # multithreaded
-        with Pool(MAX_JOBS) as p:
-            elcoord = np.array(p.map(
-                partial(FvcomGrid._meaner, a=self.ncoord), self.nv.T - 1))
-        return elcoord.T
-
-    def _el_neis(self):
-        """Computes NBE (indices of element neighbors) just like in FVCOM."""
-        nbe = np.zeros((3, self.n), int)
-        node_els = [[] for x in range(self.m)]
-        for i,ns in enumerate(self.nv.T - 1):
-            for n in ns:
-                node_els[n].append(i)
-        for i,nl in enumerate(node_els):
-            node_els[i] = np.array(nl)
-        for i,(n1,n2,n3) in enumerate(self.nv.T - 1):
-            pairs = ((n2,n3),(n1,n3),(n1,n2))
-            for pi,(p1,p2) in enumerate(pairs):
-                overlap = np.intersect1d(node_els[p1], node_els[p2])
-                # There can't be more than two elements returned, so find the
-                # element that is not equal to i (else zero)
-                nbe[pi,i] = np.where(overlap != i, overlap + 1, 0).max()
-        return nbe
 
 # Gotten from https://stackoverflow.com/a/312464
 def chunks(lst, n):
@@ -238,7 +154,7 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
 
         latlons = np.array(section_eles_gdf.loc[name, "geometry"].coords)
         outds = start_netcdf(indata, out_fn, len(time_range),
-                section['eles'].size, indata.dimensions['siglay'].size,
+                section, indata.dimensions['siglay'].size,
                 latlons[:,0], latlons[:,1], meta)
         # Populate simple fields
         outds['ocean_time'][:] = time_range['ocean_time']
@@ -286,7 +202,7 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
         start_time = time.perf_counter()
         make_plots(indata, sections, output_dir)
         elapsed = time.perf_counter() - start_time
-        logger.info(f'Plot generation completed in {elapsed} secs')
+        logger.info(f'Plot generation completed in {elapsed:.1f} secs')
     indata.close()
 
 
@@ -474,12 +390,13 @@ def build_section(name, config, grid, z, zz, ele_adj_dict):
     }
 
 
-def start_netcdf(ds, out_fn, NT, NX, NZ, Lon, Lat, Ldir, vn_list=('salt',)):
+def start_netcdf(ds, out_fn, NT, sectiondata, NZ, Lon, Lat, Ldir, vn_list=('salt',)):
     """Create a NetCDF file for the extraction results.
 
     This is almost identical to Parker MacCready's start_netcdf function
     in x_tef/tef_fun.py with a few tweaks to copy variables/dimensions from
-    an FVCOM NetCDF file.
+    an FVCOM NetCDF file, and store a bit of extra data for custom
+    processing.
     """
 
     try: # get rid of the existing version
@@ -517,17 +434,22 @@ def start_netcdf(ds, out_fn, NT, NX, NZ, Lon, Lat, Ldir, vn_list=('salt',)):
     units_dict['lat'] = 'degrees'
     long_name_dict['h'] = 'depth'
     units_dict['h'] = 'm'
+    long_name_dict['ele'] = 'FVCOM grid element index'
+    units_dict['ele'] = 'index from 1'
     long_name_dict['z0'] = 'z on sigma-grid with zeta=0'
     units_dict['z0'] = 'm'
     long_name_dict['DA0'] = 'cell area on sigma-grid with zeta=0'
     units_dict['DA0'] = 'm2'
+    long_name_dict['n'] = 'normal unit vector components in up-estuary direction'
+    units_dict['n'] = 'none'
 
     # initialize netcdf output file
     foo = Dataset(out_fn, 'w')
-    foo.createDimension('xi_sect', NX)
+    foo.createDimension('xi_sect', sectiondata['eles'].size)
     foo.createDimension('s_z', NZ)
     foo.createDimension('ocean_time', NT)
     foo.createDimension('sdir_str', 2)
+    foo.createDimension('xy', 2)
     for vv in ['ocean_time']:
         v_var = foo.createVariable(vv, float, ('ocean_time',))
         v_var.long_name = long_name_dict[vv]
@@ -544,14 +466,24 @@ def start_netcdf(ds, out_fn, NT, NX, NZ, Lon, Lat, Ldir, vn_list=('salt',)):
         v_var = foo.createVariable(vv, float, ('xi_sect'))
         v_var.long_name = long_name_dict[vv]
         v_var.units = units_dict[vv]
+    for vv in ['ele']:
+        v_var = foo.createVariable(vv, int, ('xi_sect'))
+        v_var.long_name = long_name_dict[vv]
+        v_var.units = units_dict[vv]
     for vv in ['zeta']:
         v_var = foo.createVariable(vv, float, ('ocean_time', 'xi_sect'))
         v_var.long_name = 'Free Surface Height'
         v_var.units = 'm'
+    for vv in ['n']:
+        v_var = foo.createVariable(vv, float, ('xi_sect', 'xy'))
+        v_var.long_name = long_name_dict[vv]
+        v_var.units = units_dict[vv]
 
     # add static variables
     foo['lon'][:] = Lon
     foo['lat'][:] = Lat
+    foo['ele'][:] = sectiondata['eles']
+    foo['n'][:] = sectiondata['n']
 
     # add global attributes
     foo.gtagex = Ldir['gtagex']
