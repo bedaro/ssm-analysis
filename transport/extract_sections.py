@@ -9,8 +9,6 @@ part, on Parker's x_tef/plot_physical_section.py
 
 TODO
 - A --cache option like rawcdf_extract so files are read/written in TMPDIR
-- conform output directories to Parker's naming convention so stuff doesn't
-  have to be moved around afterward
 """
 
 import time
@@ -26,7 +24,7 @@ from functools import partial
 from netCDF4 import Dataset, MFDataset
 import numpy as np
 import networkx as nx
-from shapely.geometry import Polygon, LineString
+from shapely.geometry import LineString
 import pandas as pd
 import geopandas as gpd
 import matplotlib.pyplot as plt
@@ -235,8 +233,8 @@ def copy_data(name, section, infiles, time_range, output_dir):
                 'zeta': indata['zeta'][tin_slc,n-1]
         }
 
-    for i,(ele,n,da0) in enumerate(zip(section['eles'], section['n'],
-            section['da0'].T)):
+    for i,(ele,n,uadj,da0) in enumerate(zip(section['eles'], section['n'],
+            section['uadj'], section['da0'].T)):
         # Average scalar values from the nodes belonging to this element
         mynodes = indata['nv'][:,ele-1].astype(int)
         salt = np.mean(
@@ -251,8 +249,8 @@ def copy_data(name, section, infiles, time_range, output_dir):
         bytes_written += zeta.size * zeta.itemsize
 
         # Calculate u dot n (transport flux in m/s)
-        u = indata['u'][tin_slc,:,ele-1]
-        v = indata['v'][tin_slc,:,ele-1]
+        u = indata['u'][tin_slc,:,ele-1] * uadj
+        v = indata['v'][tin_slc,:,ele-1] * uadj
         tf = u * n[0] + v * n[1]
 
         # Calculate q = tf times DA0
@@ -341,27 +339,37 @@ def build_section(name, config, grid, z, zz, ele_adj_dict):
     # Vector from the centroid to the previous midpoint
     dx1 = xm[:-1] - ele_xs
     dy1 = ym[:-1] - ele_ys
-    th1 = np.arctan2(dy1, dx1)
-    # Adjust bounds to be [0..2pi]
-    th1 = np.where(th1 < 0, th1 + 2 * np.pi, th1)
     # Vector from the centroid to the next midpoint
     dx2 = xm[1:] - ele_xs
     dy2 = ym[1:] - ele_ys
-    th2 = np.arctan2(dy2, dx2)
+    # Vector from previous to next midpoint (completes a triangle)
+    dx3 = xm[1:] - xm[:-1]
+    dy3 = ym[1:] - ym[:-1]
+    # Calculate the unit normal of the third vector, pointing to the right
+    th3 = np.arctan2(dy3, dx3)
     # Adjust bounds to be [0..2pi]
-    th2 = np.where(th2 < 0, th2 + 2 * np.pi, th2)
-    # Bisector angle
-    thn = (th1 + th2)/2
-    # Standardize all unit vectors to point to the right of the
-    # incoming vector (opposite of (dx1, dy1))
-    thn = np.where(th1 > th2, (thn - np.pi) % (2 * np.pi), thn)
+    th3 = np.where(th3 < 0, th3 + 2 * np.pi, th3)
+    # Standardize the unit vector to point to the right of (dx3, dy3)
+    th3 = (th3 - np.pi / 2) % (2 * np.pi)
     # If there's a direction override to the left, adjust the angle so
     # it points in the correct direction
     if 'upesty' in config and config['upesty'] == 'l':
-        thn += np.pi
+        th3 += np.pi
     # Save the x/y coordinates of the unit vector
-    ns[:,0] = np.cos(thn)
-    ns[:,1] = np.sin(thn)
+    ns[:,0] = np.cos(th3)
+    ns[:,1] = np.sin(th3)
+
+    # Compute the velocity factor, uadj
+    # In two dimensions, the section through the element is two line
+    # segments: centroid to prev midpoint and centroid to next midpoint.
+    # The integral of u dot (normal to section through the element) is,
+    # by continuity, equal to the integral of u dot (normal to shortcut)
+    # where "shortcut" is just the final leg of the triangle formed by the
+    # centroid and the two midpoints. Since this third line is shorter than
+    # the sum of the other two (which make up dA) we have to multiply the
+    # velocity by a factor less than 1 to get the transport right later.
+    uadj = np.sqrt(dx3 ** 2 + dy3 ** 2) / (np.sqrt(dx1 ** 2 + dy1 ** 2) +
+            np.sqrt(dx2 ** 2 + dy2 ** 2))
 
     # Compute the average depth of cell centers
     # Shape is (siglay, len(eles))
@@ -383,6 +391,7 @@ def build_section(name, config, grid, z, zz, ele_adj_dict):
         "xm": xm,
         "ym": ym,
         "n": ns,
+        "uadj": uadj,
         "hm": hnm,
         "z0": z0,
         "a": a,

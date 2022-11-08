@@ -4,6 +4,7 @@ from functools import partial
 
 import numpy as np
 import geopandas as gpd
+from shapely.geometry import Polygon
 
 @dataclass(frozen=True)
 class FvcomGrid:

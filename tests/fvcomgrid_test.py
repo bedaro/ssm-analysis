@@ -1,32 +1,29 @@
 #!/usr/bin/env python3
 
 import unittest
-import extract_sections
+from fvcom import FvcomGrid
 import numpy as np
 
 class TestFvcomGrid(unittest.TestCase):
-    def setUp(self):
-        extract_sections.MAX_JOBS = 2
-
     def test_init(self):
         # 2-D only
-        grid = extract_sections.FvcomGrid(np.zeros((2, 20), int),
+        grid = FvcomGrid(np.zeros((2, 20), int),
                 np.zeros((3, 30), int))
         self.assertEqual(grid.m, 20)
         self.assertEqual(grid.n, 30)
         # Include depth
-        grid2 = extract_sections.FvcomGrid(np.zeros((3, 20), int),
+        grid2 = FvcomGrid(np.zeros((3, 20), int),
                 np.zeros((3, 30), int))
         self.assertEqual(grid.m, 20)
         self.assertEqual(grid.n, 30)
 
     @unittest.expectedFailure
     def test_integrity_check(self):
-        grid = extract_sections.FvcomGrid(nv=np.zeros((3, 20), int), ncoord=np.zeros((5, 30), int))
+        grid = FvcomGrid(nv=np.zeros((3, 20), int), ncoord=np.zeros((5, 30), int))
 
     @unittest.expectedFailure
     def test_calc_needed(self):
-        grid = extract_sections.FvcomGrid(np.zeros((2, 20), int),
+        grid = FvcomGrid(np.zeros((2, 20), int),
                 np.zeros((3, 30), int))
         nbe = grid.nbe
         elcoord = grid.elcoord
@@ -44,7 +41,7 @@ class TestFvcomGrid(unittest.TestCase):
             [7,8,10],
             [2,7,10],
             [1,2,10]]).T
-        grid = extract_sections.FvcomGrid(ncoord=np.zeros((2, m), int), nv=nv, calc=True)
+        grid = FvcomGrid(ncoord=np.zeros((2, m), int), nv=nv, calc=True)
         nbe = grid.nbe
         self.assertEqual((3, grid.n), nbe.shape)
         # First node
@@ -80,7 +77,7 @@ class TestFvcomGrid(unittest.TestCase):
             [2, 5],
             [3, 3],
             [2, 1]]).T
-        grid = extract_sections.FvcomGrid(ncoord, nv, calc=True)
+        grid = FvcomGrid(ncoord, nv, calc=True)
         elcoord = grid.elcoord
         self.assertEqual((2, grid.n), elcoord.shape)
         self.assertEqual(2/3, elcoord[0, 0])
