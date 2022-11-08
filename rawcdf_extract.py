@@ -5,7 +5,7 @@ import os
 import tempfile
 import shutil
 import logging
-from enum import Enum
+from enum import Flag, auto
 from argparse import ArgumentParser, Namespace, FileType
 from netCDF4 import Dataset, MFDataset
 import geopandas as gpd
@@ -38,6 +38,9 @@ def get_node_ids(shps, masked):
 DEFAULT_SIGLAYERS = [-0.01581139, -0.06053274, -0.12687974, -0.20864949,
                   -0.30326778, -0.40915567, -0.52520996, -0.65060186,
                   -0.78467834, -0.9269075 ]
+DEFAULT_SIGLEVS = [0, -0.03162277, -0.08944271, -0.16431676,
+                   -0.2529822, -0.35355335, -0.46475798, -0.58566195,
+                   -0.7155418, -0.85381496, -1]
 
 def copy_ncatts(inds, invar, outvar):
     # some variables are different between files in a MFDataset so we need
@@ -57,7 +60,7 @@ def init_output(output_cdf, indata, nodes, **kwargs):
     for node_v in ('h','x','y'):
         v = output.createVariable(node_v, "f4", ('node',))
         copy_ncatts(indata, node_v, v)
-        output[node_v][:] = indata[node_v][nodes]
+        output[node_v][:] = indata[node_v][nodes - 1]
     timeVar = output.createVariable('time', "f4", ('time',))
     copy_ncatts(indata, 'time', timeVar)
     # Iterate over all output variables
@@ -85,9 +88,12 @@ def append_output(output_cdf):
 
 def get_var_name(prefix, var, attr):
     out_name = prefix + var
-    if attr != InputAttr.ALL:
-        out_name += '_' + list(attr_strings.keys())[
-                list(attr_strings.values()).index(attr)]
+    if InputAttr.ALL not in attr:
+        # iterating over a Flag isn't supported until Python 3.11. So
+        # to make the corresponding list we need to do an O(n) search of
+        # the InputAttr class
+        attrl = [list(attr_strings.keys())[list(attr_strings.values()).index(a)] for a in InputAttr if a in attr]
+        out_name += '_' + ','.join(attrl)
     return out_name
 
 def init_output_vars(output, indata, **kwargs):
@@ -111,27 +117,29 @@ def chunks(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i+n]
 
-class InputAttr(Enum):
-    ALL = 0
-    BOTTOM = 1
-    MAX = 2
-    MIN = 3
-    MEAN = 4
-    # TODO add "photic" for the photic zone
+class InputAttr(Flag):
+    ALL = auto()
+    BOTTOM = auto()
+    MAX = auto()
+    MIN = auto()
+    MEAN = auto()
+    PHOTIC = auto()
 
 attr_strings = {
     "all": InputAttr.ALL,
     "bottom": InputAttr.BOTTOM,
     "min": InputAttr.MIN,
     "max": InputAttr.MAX,
-    "mean": InputAttr.MEAN
+    "mean": InputAttr.MEAN,
+    "photic": InputAttr.PHOTIC
 }
 
 # Expands an input variable argument into a variable name and an attribute
 # describing the vertical extraction method.
 def colon_meta(string):
-    var, attr = string.split(':', 2)
-    return (var, attr_strings[attr])
+    var, attrs = string.split(':', 2)
+    attr = np.bitwise_or.reduce([attr_strings[attr] for attr in attrs.split(',')])
+    return (var, attr)
 
 def main():
     script_home = os.path.dirname(os.path.realpath(__file__))
@@ -230,28 +238,52 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
     logger.info("Extraction finished.")
     outdata.close()
 
+def get_photic_mask(cdfin, node_ids):
+    times_per_day = int(86400 / (cdfin['time'][1] - cdfin['time'][0]))
+    # Compute a moving average for 24 hours
+    cs = cdfin['IAVG'][:,:,node_ids - 1].cumsum(axis=0, dtype=float)
+    cs[times_per_day:] -= cs[:-times_per_day]
+    avglight = np.zeros_like(cs)
+    for n in range(1, times_per_day):
+        avglight[n-1,:] = cs[n - 1,:] / n
+    avglight[times_per_day - 1:,:] = cs[times_per_day - 1:,:] / times_per_day
+
+    # Mask all locations with no light (to catch when surface light is zero)
+    # or light at depth is less than 1% of surface
+    mask = (avglight[:] == 0) | (avglight[:] < avglight[:,[0],:] * 0.01)
+    return mask
+
 def copy_data(cdfin, cdfout, timeidx, node_ids, **kwargs):
+    if 'siglev' in cdfin.variables:
+        cdfin['siglev'].set_auto_mask(False)
+        siglayers = cdfin['siglev'][:-1] - cdfin['siglev'][1:]
+    else:
+        siglayers = DEFAULT_SIGLEVS
     args = Namespace(**kwargs)
     times_ct = len(cdfin.dimensions['time'])
     alldata = {}
+    photic_mask = None
     # Copy zeta if it's needed
     if 'zeta' in cdfout.variables:
         alldata['zeta'] = cdfin['zeta'][:, node_ids - 1]
         cdfout['zeta'][timeidx:timeidx + times_ct, :] = alldata['zeta']
     for var, attr in args.input_vars:
         out_name = get_var_name(args.outprefix, var, attr)
-        if attr == InputAttr.BOTTOM:
+        if InputAttr.BOTTOM in attr:
             slc = -1
         else:
             slc = slice(None)
         data = cdfin[var][:, slc, node_ids - 1]
-        # TODO add "photic" case which will look rather different
-        if attr == InputAttr.MIN:
+        if InputAttr.PHOTIC in attr:
+            if photic_mask is None:
+                photic_mask = get_photic_mask(cdfin, node_ids)
+            data = np.ma.masked_array(data, mask=photic_mask)
+        if InputAttr.MIN in attr:
             data = data.min(axis=1)
-        elif attr == InputAttr.MAX:
+        elif InputAttr.MAX in attr:
             data = data.max(axis=1)
-        elif attr == InputAttr.MEAN:
-            data = data.mean(axis=1)
+        elif InputAttr.MEAN in attr:
+            data = np.ma.average(data, axis=1, weights=siglayers)
         logger.debug("data is shape " + str(data.shape))
         if len(cdfout[out_name].dimensions) == 3:
             cdfout[out_name][timeidx:timeidx+times_ct,:,:] = data
