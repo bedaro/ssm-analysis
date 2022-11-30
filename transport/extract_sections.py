@@ -54,6 +54,9 @@ def main():
             help="Process this many model NetCDF files at once")
     parser.add_argument("-p", "--make-plots", action="store_true",
             dest="make_plots", help="Generate plots of the transects")
+    parser.add_argument("-u", "--uniform-velocity", action="store_true",
+            dest="uniform_velocity",
+            help="Assume spatially uniform velocity within each element")
     parser.add_argument("-x", "--ex_name", type=str,
             help="Experiment name")
     parser.add_argument("-d", "--output-start-date", type=str,
@@ -70,7 +73,8 @@ def main():
 
     parser.set_defaults(chunk_size=4, max_jobs=len(os.sched_getaffinity(0)),
             date_string0='none', date_string1='none', ex_name='untitled',
-            output_start_date='2014.01.01', verbose=False, make_plots=False)
+            output_start_date='2014.01.01', verbose=False, make_plots=False,
+            uniform_velocity=False)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
 
@@ -184,7 +188,8 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
         data_size = 0
         with Pool(MAX_JOBS) as p:
             partial_fn = partial(copy_data, infiles=cdfchunk,
-                    time_range=times_available, output_dir=output_dir)
+                    time_range=times_available, output_dir=output_dir,
+                    uniform=args.uniform_velocity)
             data_size = np.sum(p.starmap(partial_fn, sections.items()))
 
         i += chunk_times
@@ -204,7 +209,7 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
     indata.close()
 
 
-def copy_data(name, section, infiles, time_range, output_dir):
+def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
     indata = MFDataset(infiles) if len(infiles) > 1 else Dataset(infiles[0])
     bytes_written = 0
 
@@ -233,8 +238,11 @@ def copy_data(name, section, infiles, time_range, output_dir):
                 'zeta': indata['zeta'][tin_slc,n-1]
         }
 
-    for i,(ele,n,uadj,da0) in enumerate(zip(section['eles'], section['n'],
-            section['uadj'], section['da0'].T)):
+    for i,(ele,neis,x,y,n1,n2,mx1,my1,mx2,my2,pinv,da0) in enumerate(zip(
+            section['eles'], section['neis'], section['x'], section['y'],
+            section['n1'], section['n2'], section['xm'][:-1],
+            section['ym'][:-1], section['xm'][1:], section['ym'][1:],
+            section['xypinv'], section['da0'].T)):
         # Average scalar values from the nodes belonging to this element
         mynodes = indata['nv'][:,ele-1].astype(int)
         salt = np.mean(
@@ -249,9 +257,49 @@ def copy_data(name, section, infiles, time_range, output_dir):
         bytes_written += zeta.size * zeta.itemsize
 
         # Calculate u dot n (transport flux in m/s)
-        u = indata['u'][tin_slc,:,ele-1] * uadj
-        v = indata['v'][tin_slc,:,ele-1] * uadj
-        tf = u * n[0] + v * n[1]
+        u0 = indata['u'][tin_slc,:,ele-1]
+        v0 = indata['v'][tin_slc,:,ele-1]
+        dx1 = mx1 - x
+        dy1 = my1 - y
+        l1 = np.sqrt(dx1 ** 2 + dy1 ** 2)
+        dx2 = mx2 - x
+        dy2 = my2 - y
+        l2 = np.sqrt(dx2 ** 2 + dy2 ** 2)
+        l = l1 + l2
+        if uniform:
+            # Uniform velocity model within the element, similar to Conroy
+            tf = l1/l * (u0 * n1[0] + v0 * n1[1]) + l2/l * (u0 * n2[0] + v0 * n2[1])
+        else:
+            # X/Y nonuniform velocity model per the FVCOM manual
+            nei_u = indata['u'][tin_slc,:,neis]
+            nei_v = indata['v'][tin_slc,:,neis]
+            du = (nei_u.T - u0.T).T
+            dv = (nei_v.T - v0.T).T
+            # This makes errors worse
+            #if len(neis) == 2:
+                # Add a zero velocity condition (corresponding to the edge)
+            #    du = np.concatenate((du, np.expand_dims(-u0, 2)), axis=2)
+            #    dv = np.concatenate((dv, np.expand_dims(-v0, 2)), axis=2)
+            # First, reshape du and dv to semi-flatten them
+            du_reshape = du.T.reshape(du.shape[2], (du.shape[0]*du.shape[1])).data
+            dv_reshape = dv.T.reshape(dv.shape[2], (dv.shape[0]*dv.shape[1])).data
+            # Get the a/b least squares constants
+            abu_reshape = pinv @ du_reshape
+            abv_reshape = pinv @ dv_reshape
+            abu = abu_reshape.reshape(2, du.shape[1], du.shape[0]).T
+            abv = abv_reshape.reshape(2, dv.shape[1], dv.shape[0]).T
+            au = abu[:,:,0]
+            bu = abu[:,:,1]
+            av = abv[:,:,0]
+            bv = abv[:,:,1]
+
+            # Perform the calculation (see VelocityExtraction notebook for the
+            # derivation)
+            tf = (l1 * (n1[0] * (u0 + 0.5 * (au * dx1 + bu * dy1))
+                        + n1[1] * (v0 + 0.5 * (av * dx1 + bv * dy1))
+                       ) + l2 * (n2[0] * (u0 + 0.5 * (au * dx2 + bu * dy2))
+                                 + n2[1] * (v0 + 0.5 * (av * dx2 + bv * dy2))
+                                )) / l
 
         # Calculate q = tf times DA0
         # Final shape is (t, siglay)
@@ -335,13 +383,18 @@ def build_section(name, config, grid, z, zz, ele_adj_dict):
 
     # Calculate the up-estuary unit vectors that define the flux surface
     # for each element
-    ns = np.zeros((len(eles), 2))
+    ns1 = np.zeros((len(eles), 2))
+    ns2 = np.zeros((len(eles), 2))
     # Vector from the centroid to the previous midpoint
     dx1 = xm[:-1] - ele_xs
     dy1 = ym[:-1] - ele_ys
+    th1 = np.arctan2(-dy1, -dx1)
+    th1 = (np.where(th1 < 0, th1 + 2 * np.pi, th1) - np.pi / 2) % (2 * np.pi)
     # Vector from the centroid to the next midpoint
     dx2 = xm[1:] - ele_xs
     dy2 = ym[1:] - ele_ys
+    th2 = np.arctan2(dy2, dx2)
+    th2 = (np.where(th2 < 0, th2 + 2 * np.pi, th2) - np.pi / 2) % (2 * np.pi)
     # Vector from previous to next midpoint (completes a triangle)
     dx3 = xm[1:] - xm[:-1]
     dy3 = ym[1:] - ym[:-1]
@@ -354,22 +407,14 @@ def build_section(name, config, grid, z, zz, ele_adj_dict):
     # If there's a direction override to the left, adjust the angle so
     # it points in the correct direction
     if 'upesty' in config and config['upesty'] == 'l':
+        th1 += np.pi
+        th2 += np.pi
         th3 += np.pi
     # Save the x/y coordinates of the unit vector
-    ns[:,0] = np.cos(th3)
-    ns[:,1] = np.sin(th3)
-
-    # Compute the velocity factor, uadj
-    # In two dimensions, the section through the element is two line
-    # segments: centroid to prev midpoint and centroid to next midpoint.
-    # The integral of u dot (normal to section through the element) is,
-    # by continuity, equal to the integral of u dot (normal to shortcut)
-    # where "shortcut" is just the final leg of the triangle formed by the
-    # centroid and the two midpoints. Since this third line is shorter than
-    # the sum of the other two (which make up dA) we have to multiply the
-    # velocity by a factor less than 1 to get the transport right later.
-    uadj = np.sqrt(dx3 ** 2 + dy3 ** 2) / (np.sqrt(dx1 ** 2 + dy1 ** 2) +
-            np.sqrt(dx2 ** 2 + dy2 ** 2))
+    ns1[:,0] = np.cos(th1)
+    ns1[:,1] = np.sin(th1)
+    ns2[:,0] = np.cos(th2)
+    ns2[:,1] = np.sin(th2)
 
     # Compute the average depth of cell centers
     # Shape is (siglay, len(eles))
@@ -383,15 +428,37 @@ def build_section(name, config, grid, z, zz, ele_adj_dict):
     zthick = np.expand_dims(z[:-1] - z[1:], 1) @ np.expand_dims(ele_hs, 0)
     da0 = a * zthick
 
+    # Two more things to calculate:
+    # neighbors of each element (won't have grid object later to get them)
+    # pinv matrix for each element's neighbor or midpoint coordinates
+    # (needed to compute velocity field inside element; see eq's 3.20 and
+    # 3.21 of the FVCOM manual)
+    allneis = (grid.nbe[:,eles-1] - 1).T
+    elneis = []
+    pinvs = []
+    for i,(el,neis) in enumerate(zip(eles, allneis)):
+        neis = neis[neis > -1]
+        elneis.append(neis)
+        dxy = (grid.elcoord[0:2, neis].T -
+               grid.elcoord[0:2,el-1].T)
+        #if len(neis) == 2:
+            # We're on an edge, so add the midpoint of that edge as a
+            # constraint that will be set to zero velocity later
+        #    edgept = [xm[0], ym[0]] if i == 0 else [xm[-1], ym[-1]]
+        #    dxy = np.concatenate((dxy, [edgept]))
+        pinvs.append(np.linalg.pinv(dxy))
+
     return {
         "eles": eles,
+        "neis": elneis,
+        "xypinv": pinvs,
         "x": ele_xs,
         "y": ele_ys,
         "h": ele_hs,
         "xm": xm,
         "ym": ym,
-        "n": ns,
-        "uadj": uadj,
+        "n1": ns1,
+        "n2": ns2,
         "hm": hnm,
         "z0": z0,
         "a": a,
@@ -492,7 +559,9 @@ def start_netcdf(ds, out_fn, NT, sectiondata, NZ, Lon, Lat, Ldir, vn_list=('salt
     foo['lon'][:] = Lon
     foo['lat'][:] = Lat
     foo['ele'][:] = sectiondata['eles']
-    foo['n'][:] = sectiondata['n']
+    bisectors = sectiondata['n1'] + sectiondata['n2']
+    foo['n'][:] = (bisectors.T /
+            np.sqrt(bisectors[:,0] ** 2 + bisectors[:,1] ** 2)).T
 
     # add global attributes
     foo.gtagex = Ldir['gtagex']
@@ -505,8 +574,12 @@ def plot_locations(ax, grid, sections_gdf, sectiondata, all_x=None, all_y=None):
     p = sections_gdf.plot(ax=ax, color='tab:red', zorder=2)
     # Add up-estuary flow direction arrows
     for sect in sectiondata.values():
-        ax.quiver(sect['x'], sect['y'], sect['n'][:,0], sect['n'][:,1],
-                zorder=3, alpha=0.7)
+        ax.quiver((sect['x'] + sect['xm'][:-1]) / 2,
+                (sect['y'] + sect['ym'][:-1]) / 2, sect['n1'][:,0],
+                sect['n1'][:,1], zorder=3, alpha=0.7)
+        ax.quiver((sect['x'] + sect['xm'][1:]) / 2,
+                (sect['y'] + sect['ym'][1:]) / 2, sect['n2'][:,0],
+                sect['n2'][:,1], zorder=3, alpha=0.7)
     xmin, xmax, ymin, ymax = p.axis()
     if len(sections_gdf) == 1:
         # Zoom out a bit and adjust the aspect ratio
