@@ -14,6 +14,7 @@ TODO
 import time
 from datetime import datetime
 import os
+import psutil
 import logging
 import requests
 from argparse import ArgumentParser, Namespace
@@ -54,6 +55,7 @@ def main():
             help="Process this many model NetCDF files at once")
     parser.add_argument("-p", "--make-plots", action="store_true",
             dest="make_plots", help="Generate plots of the transects")
+    # FIXME make this default as it's more accurate
     parser.add_argument("-u", "--uniform-velocity", action="store_true",
             dest="uniform_velocity",
             help="Assume spatially uniform velocity within each element")
@@ -71,8 +73,9 @@ def main():
             help="Print progress messages during the extraction")
     # TODO implement caching option for performance on Klone
 
-    parser.set_defaults(chunk_size=4, max_jobs=len(os.sched_getaffinity(0)),
-            date_string0='none', date_string1='none', ex_name='untitled',
+    parser.set_defaults(chunk_size=4, max_jobs=min(
+                len(os.sched_getaffinity(0)), psutil.cpu_count(logical=False)
+            ), date_string0='none', date_string1='none', ex_name='untitled',
             output_start_date='2014.01.01', verbose=False, make_plots=False,
             uniform_velocity=False)
     args = parser.parse_args()
@@ -238,9 +241,9 @@ def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
                 'zeta': indata['zeta'][tin_slc,n-1]
         }
 
-    for i,(ele,neis,x,y,n1,n2,mx1,my1,mx2,my2,pinv,da0) in enumerate(zip(
+    for i,(ele,neis,x,y,h,n1,n2,mx1,my1,mx2,my2,pinv,da0) in enumerate(zip(
             section['eles'], section['neis'], section['x'], section['y'],
-            section['n1'], section['n2'], section['xm'][:-1],
+            section['h'], section['n1'], section['n2'], section['xm'][:-1],
             section['ym'][:-1], section['xm'][1:], section['ym'][1:],
             section['xypinv'], section['da0'].T)):
         # Average scalar values from the nodes belonging to this element
@@ -301,9 +304,11 @@ def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
                                  + n2[1] * (v0 + 0.5 * (av * dx2 + bv * dy2))
                                 )) / l
 
-        # Calculate q = tf times DA0
+        # Calculate q = tf times DA
         # Final shape is (t, siglay)
-        q = tf * da0
+        #print('tf', tf.shape)
+        #print('zeta', zeta.shape)
+        q = tf * da0 * (1 + np.expand_dims(zeta, 1)/h)
         outds['q'][tout_slc,:,i] = q
         bytes_written += q.size * q.itemsize
 
@@ -629,7 +634,11 @@ def make_plots(indata, sections, outdir):
 
     section_plot_nameconf = partial(make_section_plot, outdir=outdir,
             grid=grid, z=z)
-    with Pool(MAX_JOBS) as p:
+    # make_section_plot seems to spawn two additional subthreads that don't
+    # tax the CPU heavily. So the number of pool tasks is reduced to
+    # whichever is smaller: MAX_JOBS or one third of the total number of
+    # "CPU's" (which may include threads)
+    with Pool(min(MAX_JOBS, int(len(os.sched_getaffinity(0))/3))) as p:
         res = p.starmap(section_plot_nameconf,
                 sections.items())
         names = map(lambda x: x[0], res)
@@ -732,7 +741,9 @@ def make_section_plot(name, sectiondata, outdir, grid, z):
         qq = q[it0:it1,:].mean(axis=0)
         ss = salt[it0:it1,:].mean(axis=0)
 
-        fig = plt.figure(figsize=(13,8))
+        # See https://stackoverflow.com/a/65910539/413862 for how num and
+        # clear prevent memory leaks
+        fig = plt.figure(num=1, figsize=(13,8), clear=True)
 
         # Modified from Parker's code to use flat shading instead of nearest,
         # as this produces more accurately outer edges.
@@ -765,7 +776,6 @@ def make_section_plot(name, sectiondata, outdir, grid, z):
         nnnn = ('0000' + str(mm))[-4:]
         plotname = 'plot_' + nnnn
         fig.savefig(PLOT_PATH.format(outdir=outdir, name=name, plot=plotname))
-        plt.close(fig)
 
     ds.close()
     return name, sect_x, sect_y, gdf

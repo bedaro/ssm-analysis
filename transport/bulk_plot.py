@@ -3,6 +3,7 @@
 Plot bulk fluxes as a time series.
 """
 import os, sys
+from multiprocessing import Pool
 import Lfun
 import zfun
 Ldir = Lfun.Lstart()
@@ -15,6 +16,8 @@ import matplotlib.pyplot as plt
 from netCDF4 import Dataset
 import pickle
 from datetime import datetime, timedelta
+# 2019.11.14 make monthly averages
+import pandas as pd
 
 sys.path.append(os.path.abspath(Ldir['LO'] + 'x_tef'))
 import tef_fun
@@ -57,7 +60,7 @@ Lfun.make_dir(outdir)
 
 sect_list = [item for item in sect_list]
 
-for snp in sect_list:
+def process_section(snp):
     
     sn = snp.replace('.p','')
 
@@ -123,8 +126,6 @@ for snp in sect_list:
     Qnet = np.nansum(QQ, axis=1)
     # RESULT: it is identical
     
-    # 2019.11.14 make monthly averages
-    import pandas as pd
     td_list = []
     for t in td:
         td_list.append(datetime(year,1,1,0,0,0) + timedelta(days=t))
@@ -142,7 +143,9 @@ for snp in sect_list:
     tef_mean_df.loc[:,'yd'] = tef_mean_df.index.dayofyear
 
     # PLOTTING
-    fig = plt.figure(figsize=(21,9))
+    # See https://stackoverflow.com/a/65910539/413862 for how num and
+    # clear prevent memory leaks
+    fig = plt.figure(num=1 if save_fig else None, figsize=(21,9))
     
     alpha = .5
 
@@ -225,6 +228,10 @@ for snp in sect_list:
     
     if save_fig:
         plt.savefig(outdir + sn + '.png')
-        plt.close()
+        fig.clear()
     else:
         plt.show()
+
+tasks = len(os.sched_getaffinity(0))
+with Pool(tasks) as p:
+    p.map(process_section, sect_list)
