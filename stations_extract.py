@@ -7,6 +7,7 @@ from collections import deque
 import time
 import logging
 import os
+import re
 import numpy as np
 import pandas as pd
 
@@ -95,11 +96,13 @@ def main():
             help="Override the number of in-water variables to look for in the file")
     parser.add_argument("--state-vars-bottom", type=int, default=STATE_VARS_BOTTOM,
             help="Override the number of last-layer variables to look for in the file")
+    parser.add_argument("-a", "--output-all", action="store_true",
+            dest="output_all", help="Produce Excel files, one per layer, with all nodes/st vars")
     parser.add_argument("-n", "--output-node", type=int, action="append",
             help="Produce Excel outputs for the specified node(s)")
     parser.add_argument("-V", "--output-var", action="append",
             help="Produce Excel outputs for the specified variable name(s)")
-    parser.set_defaults(verbose=False, state_vars=STATE_VARS,
+    parser.set_defaults(verbose=False, output_all=False, state_vars=STATE_VARS,
             state_vars_bottom=STATE_VARS_BOTTOM)
     args = parser.parse_args()
 
@@ -131,6 +134,19 @@ def main():
             logger.info("Saving {0} rows of {1} variables for node {2} to {3}".format(
                 len(selection), len(selection.columns), n, out_file))
             selection.to_excel(out_file)
+
+    if args.output_all:
+        for layer in df.index.levels[2]:
+            out_excel = re.sub('\..*', f'_l{layer:02}.xlsx', args.outfile)
+            logger.info(f"Dumping all layer {layer} data to {out_excel}")
+            with pd.ExcelWriter(out_excel) as writer:
+                for stvar in df.columns:
+                    # Use dropna to avoid creating columns of NaNs for state
+                    # variables not present in this layer
+                    data = df.loc[:, :, layer][stvar].unstack(level=1).dropna(axis=1, how='all')
+                    if len(data.columns):
+                        data.to_excel(writer, sheet_name=stvar)
+
     logger.info("Finished.")
 
 if __name__ == "__main__": main()
