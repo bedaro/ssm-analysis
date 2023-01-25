@@ -14,6 +14,7 @@
 #include <boost/program_options.hpp>
 #include <yaml-cpp/yaml.h>
 #include "assembleVars.h"
+#include "copyFromHyd.h"
 #ifdef PARALLEL
   #include <mpi.h>
   #include "parNcFile.h"
@@ -158,6 +159,8 @@ int main(int argc, char *argv[]) {
         "variables")
     ("config,c", po::value<std::string>(),
         "Specify a config file with the output variables")
+    ("hyd-model,m", po::value<std::string>(),
+        "Specify a hydrodynamic output file to populate grid from")
     ("verbose,v", "Verbose output")
     ("output-file", po::value<std::string>()->required(),
         "Output netcdf file name")
@@ -210,6 +213,10 @@ int main(int argc, char *argv[]) {
   try {
 #ifndef PARALLEL
     netCDF::NcFile ncFile(output_file, netCDF::NcFile::newFile);
+    if(vm.count("hyd-model")) {
+      netCDF::NcFile ncHyd(vm["hyd-model"].as<std::string>(), netCDF::NcFile::read);
+      copyFromHyd(ncHyd, ncFile);
+    }
 #else
     verbose &= (rank == 0);
     if(verbose) {
@@ -219,7 +226,23 @@ int main(int argc, char *argv[]) {
     mpiComm.Set_errhandler(MPI::ERRORS_THROW_EXCEPTIONS);
     MPI::Info mpiInfo = MPI::INFO_NULL;
 
-    netCDF::ParNcFile ncFile(mpiComm, mpiInfo, output_file, netCDF::NcFile::newFile);
+    netCDF::NcFile::FileMode fMode;
+    if(vm.count("hyd-model")) {
+      // Copy the FVCOM data only in the top-rank process, before opening the
+      // output file in parallel. This requires changing the open mode
+      if(rank == 0) {
+        netCDF::NcFile ncHyd(vm["hyd-model"].as<std::string>(), netCDF::NcFile::read);
+        netCDF::NcFile f(output_file, netCDF::NcFile::newFile);
+        copyFromHyd(ncHyd, f);
+        f.close();
+      }
+      // Make sure all other processes wait
+      mpiComm.Barrier();
+      fMode = netCDF::NcFile::write;
+    } else {
+      fMode = netCDF::NcFile::newFile;
+    }
+    netCDF::ParNcFile ncFile(mpiComm, mpiInfo, output_file, fMode);
 #endif
 
     unsigned long nodes, times, header_length;
@@ -250,10 +273,14 @@ int main(int argc, char *argv[]) {
     mpiComm.Bcast(&header_length, 1, MPI::UNSIGNED_LONG, 0);
 #endif
 
-    // Initialize the netCDF file
-    timeDim = ncFile.addDim("time", times),
-    sigmaDim = ncFile.addDim("siglay", input_files.size()),
-    cellDim = ncFile.addDim("node", nodes);
+    // Initialize the netCDF file (or at least fetch dimensions)
+    timeDim = ncFile.addDim("time", times);
+    sigmaDim = ncFile.getDim("siglay");
+    if(sigmaDim.isNull())
+      sigmaDim = ncFile.addDim("siglay", input_files.size());
+    cellDim = ncFile.getDim("node");
+    if(cellDim.isNull())
+      cellDim = ncFile.addDim("node", nodes);
     netCDF::NcVar timeVar = ncFile.addVar("time", netCDF::NcType::nc_FLOAT,
         timeDim);
 
