@@ -72,17 +72,21 @@ class ModelValidator:
         obsdata['parameter_id'] = param
         return obsdata
 
-    def process_cast(self, cast_id, group):
+    def process_cast(self, cast_id, castdata):
+        """Create a DataFrame populated with model results matching cast data"""
         global _parameter_map
         # get the parameter ID
-        param = _parameter_map.loc[group['parameter_id'].iloc[0], 'output_var']
+        param = _parameter_map.loc[castdata['parameter_id'].iloc[0], 'output_var']
         # Interpolate each cast
-        profile = interp1d(group['depth'], group['value'], bounds_error=False)
+        profile = interp1d(castdata['depth'], castdata['value'],
+                bounds_error=False)
 
         # Extract the temperature profiles from each matching node and time in
         # the model output
-        t_index = np.searchsorted(self.model_t_midpoints, group['datetime'].mean())
-        n_index = group['node'].iloc[0]
+        t_index = np.searchsorted(self.model_t_midpoints,
+                castdata['datetime'].mean())
+        n = castdata['node'].iloc[0]
+        n_index = n - 1
         model_data = self.model_output[param][t_index,:,n_index]
         model_depths = ((self.model_output['h'][n_index] +
                 self.model_output['zeta'][t_index,n_index]) *
@@ -93,9 +97,9 @@ class ModelValidator:
         observed_data = profile(model_depths)
 
         df = pd.DataFrame({
-            'location': group['location_id'].iloc[0],
+            'location': castdata['location_id'].iloc[0],
             'node': n_index,
-            'datetime': group['datetime'].iloc[0],
+            'datetime': castdata['datetime'].iloc[0],
             'depth': model_depths,
             'sigma': np.arange(1, 11),
             'model': model_data,
@@ -133,8 +137,8 @@ class ModelValidator:
         for n,group in df.groupby('node'):
             node_selector = (df['node'] == n)
             for t,group2 in group.groupby('t'):
-                model_layer_bounds = (self.model_output['h'][n] +
-                        self.model_output['zeta'][t,n])\
+                model_layer_bounds = (self.model_output['h'][n-1] +
+                        self.model_output['zeta'][t,n-1])\
                     * self.model_output['siglev'][:] * -1
                 sig_is = np.searchsorted(model_layer_bounds, group2['depth'])
                 # The outer group is a copy and not a view of the underlying
@@ -144,7 +148,7 @@ class ModelValidator:
                 df.loc[node_selector & (df['t'] == t), 'sigma'] = siglays
                 group.loc[group['t'] == t, 'sigma'] = siglays
             for s,group2 in group.groupby('sigma'):
-                df.loc[node_selector & (df['sigma'] == s), 'model'] = self.model_output[param][group2['t'],s-1,n]
+                df.loc[node_selector & (df['sigma'] == s), 'model'] = self.model_output[param][group2['t'],s-1,n-1]
 
         return df[['location','node','datetime','t','depth','sigma','observed','model']]
 
