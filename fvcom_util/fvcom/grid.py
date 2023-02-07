@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field
 from multiprocessing import Pool
 from functools import partial
+# Temporary workaround for recent geopandas
+import os
+os.environ['USE_PYGEOS'] = '0'
 
 import numpy as np
 import pandas as pd

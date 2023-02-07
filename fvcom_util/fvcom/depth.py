@@ -23,8 +23,9 @@ class DepthCoordinate:
         return DepthCoordinate(z, grid)
 
     @staticmethod
-    def from_output(dataset):
-        grid = FvcomGrid.from_output(dataset, calc=False)
+    def from_output(dataset, grid=None):
+        if grid is None:
+            grid = FvcomGrid.from_output(dataset, calc=False)
         dataset['siglev'].set_auto_mask(False)
         return DepthCoordinate(dataset['siglev'][:], grid)
 
