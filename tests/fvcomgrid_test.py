@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import unittest
-from fvcom import FvcomGrid
+from fvcom.grid import FvcomGrid
 import numpy as np
 
 class TestFvcomGrid(unittest.TestCase):
