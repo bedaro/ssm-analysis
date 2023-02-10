@@ -333,8 +333,8 @@ def tsplot_zs(validator, location_data, weight_obs=6.8):
     timeseries plot of data for a specific location.
 
     Arguments:
+    validator -- a Validator object for looking up model data
     location_data -- a DataFrame containing observations from the same location
-    model_output -- a NetCDF Dataset of model results to plot
     weight_obs -- optional parameter to tune the selection algorithm. Larger
         values favor sigma layers with more observations over time at the
         expense of extremity in the water column (very shallow/deep).
