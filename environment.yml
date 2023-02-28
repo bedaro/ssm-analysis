@@ -228,6 +228,6 @@ dependencies:
   - expat
   - adjusttext
   - contextily
-  - sqlalchemy
+  - sqlalchemy[version='<2']
   - psycopg2
 prefix: /home/benr/miniconda3/envs/ssm-analysis

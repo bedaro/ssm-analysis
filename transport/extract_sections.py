@@ -33,7 +33,7 @@ from adjustText import adjust_text
 import matplotlib.patheffects as pe
 from matplotlib import ticker
 import contextily as cx
-from fvcom import FvcomGrid
+from fvcom.grid import FvcomGrid
 
 root_logger = logging.getLogger()
 
