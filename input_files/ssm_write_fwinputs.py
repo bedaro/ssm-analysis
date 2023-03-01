@@ -144,13 +144,13 @@ def main():
     logger.info("Adjusting dates/times")
     dfs['data'] = convert_dates(dfs['data'], args.start_date)
 
-    logger.info(f"Writing River file {out_riv_file}")
-    with open(f'{args.out_base}_riv.dat') as out_riv_file:
+    logger.info(f"Writing River file")
+    with open(f'{args.out_base}_riv.dat','w') as out_riv_file:
         write_dat_file(out_riv_file, dfs, 'node', 'calculated',
             num_statevars=3, hdr_comment=args.comment)
 
-    logger.info(f"Writing WQ file {out_wq_file}")
-    with open(f'{args.out_base}_wq.dat') as out_wq_file:
+    logger.info(f"Writing WQ file")
+    with open(f'{args.out_base}_wq.dat','w') as out_wq_file:
         write_dat_file(out_wq_file, get_icm_data_only(dfs), 'point', 'calculated',
             hdr_comment=args.comment)
     logger.info("Finished.")
