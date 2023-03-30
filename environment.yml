@@ -77,7 +77,6 @@ dependencies:
   - geopandas
   - poppler
   - libev
-  - conda-build
   - python-dateutil
   - freexl
   - readline
@@ -108,7 +107,7 @@ dependencies:
   - curl
   - libarchive
   - cftime
-  - python=3.8
+  - python=3.9
   - pexpect
   - icu
   - libxcb
