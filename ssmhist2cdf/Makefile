@@ -9,7 +9,7 @@ export LIBS
 export CXXFLAGS
 
 TARGETS := ssmhist2cdf
-OBJS := ssmhist2cdf.o assembleVars.o copyFromHyd.o
+OBJS := ssmhist2cdf.o assembleVars.o copyFromHyd.o historyfile.o
 
 ifdef PARALLEL
 	CXX := mpicxx
@@ -35,7 +35,8 @@ clean:
 	make -C tests clean
 
 # Dependencies (hardcoded because they're quite simple)
-ssmhist2cdf.cpp: parNcFile.h assembleVars.h copyFromHyd.h
-parNcFile.cpp: parNcFile.h
-assembleVars.cpp: assembleVars.h
-copyFromHyd.cpp: copyFromHyd.h
+ssmhist2cdf.o: ssmhist2cdf.cpp parNcFile.h assembleVars.h copyFromHyd.h historyfile.hpp timer.hpp
+parNcFile.o: parNcFile.cpp parNcFile.h
+assembleVars.o: assembleVars.cpp assembleVars.h
+copyFromHyd.o: copyFromHyd.cpp copyFromHyd.h
+historyfile.o: historyfile.cpp historyfile.hpp
