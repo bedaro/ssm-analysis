@@ -22,6 +22,8 @@ from configparser import ConfigParser
 from multiprocessing import Pool
 from functools import partial
 
+os.environ['USE_PYGEOS'] = '0'
+
 from netCDF4 import Dataset, MFDataset
 import numpy as np
 import networkx as nx
@@ -34,6 +36,8 @@ import matplotlib.patheffects as pe
 from matplotlib import ticker
 import contextily as cx
 from fvcom.grid import FvcomGrid
+from fvcom.depth import DepthCoordinate
+from fvcom.transect import Transect
 
 root_logger = logging.getLogger()
 
@@ -94,7 +98,7 @@ def main():
 
 def sect_linestr(name, sect):
     """Build a LineString object from the X and Y values in sect"""
-    return [name, LineString([(x, y) for x, y in zip(sect['x'], sect['y'])])]
+    return [name, LineString([xy for xy in tuple(sect['transect'].ele_xys.T)])]
 
 EXTRACTION_ROOT_DIR = 'LiveOcean_output/tef/{outdir}'
 EXTRACTION_OUT_PATH = EXTRACTION_ROOT_DIR + '/extractions/{name}.nc'
@@ -113,7 +117,7 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
     sect_start = time.perf_counter()
     sections = find_sections(indata, sects_config)
     elapsed = (time.perf_counter() - sect_start)
-    total_eles = np.sum([len(s["eles"]) for n,s in sections.items()])
+    total_eles = np.sum([s["transect"].size for n,s in sections.items()])
     logger.info(f'Found {len(sections)} sections, {total_eles} elements to extract in {int(elapsed)} secs')
 
     logger.info("Determining scope of work")
@@ -229,11 +233,13 @@ def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
             (outds['ocean_time'][:] == times_out[0]).nonzero()[0][0],
             (outds['ocean_time'][:] == times_out[-1]).nonzero()[0][0]+1)
 
+    transect = section['transect']
+
     # We are going to need most node scalars at least twice, so pre-cache
     # them for all the elements in this section
     node_scalar_cache = {}
     all_sect_nodes = np.unique(np.array([
-            indata['nv'][:,ele-1] for ele in section['eles']
+            indata['nv'][:,ele-1] for ele in transect.eles
         ])).astype(int)
     for n in all_sect_nodes:
         node_scalar_cache[n] = {
@@ -241,10 +247,10 @@ def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
                 'zeta': indata['zeta'][tin_slc,n-1]
         }
 
-    for i,(ele,neis,x,y,h,n1,n2,mx1,my1,mx2,my2,pinv,da0) in enumerate(zip(
-            section['eles'], section['neis'], section['x'], section['y'],
-            section['h'], section['n1'], section['n2'], section['xm'][:-1],
-            section['ym'][:-1], section['xm'][1:], section['ym'][1:],
+    for i,(ele,neis,xy,h,n1,n2,mxy1,mxy2,pinv,da0) in enumerate(zip(
+            transect.eles, section['neis'], transect.ele_xys.T,
+            section['h'], transect.ns1, transect.ns2,
+            transect.midpoints[0:2,:-1].T, transect.midpoints[0:2,1:].T,
             section['xypinv'], section['da0'].T)):
         # Average scalar values from the nodes belonging to this element
         mynodes = indata['nv'][:,ele-1].astype(int)
@@ -262,12 +268,10 @@ def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
         # Calculate u dot n (transport flux in m/s)
         u0 = indata['u'][tin_slc,:,ele-1]
         v0 = indata['v'][tin_slc,:,ele-1]
-        dx1 = mx1 - x
-        dy1 = my1 - y
-        l1 = np.sqrt(dx1 ** 2 + dy1 ** 2)
-        dx2 = mx2 - x
-        dy2 = my2 - y
-        l2 = np.sqrt(dx2 ** 2 + dy2 ** 2)
+        dxy1 = mxy1 - xy
+        l1 = np.sqrt(dxy1[0] ** 2 + dxy1[1] ** 2)
+        dxy2 = mxy2 - xy
+        l2 = np.sqrt(dxy2[0] ** 2 + dxy2[1] ** 2)
         l = l1 + l2
         if uniform:
             # Uniform velocity model within the element, similar to Conroy
@@ -298,10 +302,10 @@ def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
 
             # Perform the calculation (see VelocityExtraction notebook for the
             # derivation)
-            tf = (l1 * (n1[0] * (u0 + 0.5 * (au * dx1 + bu * dy1))
-                        + n1[1] * (v0 + 0.5 * (av * dx1 + bv * dy1))
-                       ) + l2 * (n2[0] * (u0 + 0.5 * (au * dx2 + bu * dy2))
-                                 + n2[1] * (v0 + 0.5 * (av * dx2 + bv * dy2))
+            tf = (l1 * (n1[0] * (u0 + 0.5 * (au * dx1 + bu * dxy1[1]))
+                        + n1[1] * (v0 + 0.5 * (av * dx1 + bv * dxy1[1]))
+                       ) + l2 * (n2[0] * (u0 + 0.5 * (au * dxy2[0] + bu * dxy2[1]))
+                                 + n2[1] * (v0 + 0.5 * (av * dxy2[0] + bv * dxy2))
                                 )) / l
 
         # Calculate q = tf times DA
@@ -319,24 +323,17 @@ def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
 
 def find_sections(indata, sects_config):
     # Get basic grid data and compute what's missing
-    z = indata['siglev'][:]
-    zz = indata['siglay'][:]
-    grid = FvcomGrid(np.array([indata['x'][:],indata['y'][:],indata['h'][:]]),
-            indata['nv'][:].astype(int), calc=True)
+    grid = FvcomGrid.from_output(indata)
+    depthcoord = DepthCoordinate.from_output(indata, grid=grid)
 
-    # Build a 2-D Graph of all the grid elements, indexed from 1
-    # (the Graph gets constructed in each thread from the dict because
-    # NetworkX Graphs aren't thread-safe)
-    adj_dict = dict(enumerate(grid.nbe.swapaxes(1,0), 1))
-
-    build_section_nameconf = partial(build_section, grid=grid, z=z, zz=zz,
-            ele_adj_dict=adj_dict)
+    build_section_nameconf = partial(build_section, grid=grid,
+            depthcoord=depthcoord)
     with Pool(MAX_JOBS) as p:
         sections_list = p.starmap(build_section_nameconf,
                 [(n, sects_config[n]) for n in sects_config.sections()])
     return dict(zip(sects_config.sections(), sections_list))
 
-def build_section(name, config, grid, z, zz, ele_adj_dict):
+def build_section(name, config, grid, depthcoord):
     """Do all the unstructured grid math to identify the geometry of a transect
 
     This is the meat of the processing, and is based heavily on Ted Conroy's
@@ -346,91 +343,23 @@ def build_section(name, config, grid, z, zz, ele_adj_dict):
 
     logger = root_logger.getChild('build_section')
 
-    G = nx.Graph(ele_adj_dict)
     waypoints = np.array(config['waypoints'].split(" ")).astype(int)
     assert len(waypoints) >= 2, f'Not enough waypoints defined for section {name}'
-    # Find all the elements by taking the shortest path in the graph
-    # through the given waypoints
-    eles = []
-    for w,x in zip(waypoints[:-1], waypoints[1:]):
-        eles.extend(nx.shortest_path(G, source=w, target=x,
-            weight=lambda p1, p2, atts: grid.el_dist(p1, p2)))
-    eles = np.array(eles)
-
-    logger.debug(name, eles)
-    ele_xs, ele_ys, ele_hs = tuple(grid.elcoord[:,eles-1])
-    ele_nvs = grid.nv[:,eles-1]
-
-    # Calculate the x/y/depth coordinates at the midpoints of the edges
-    # between each element, plus the boundary edges
-    xm = np.zeros(len(eles)+1)
-    ym = np.zeros_like(xm)
-    hnm = np.zeros_like(xm)
-
-    # First, handle the first and last elements which have an edge on the
-    # model boundary. Find those boundary locations
-    for b in (0,-1):
-        ele_idx = eles[b] - 1
-        # The nodes listed in nv in the same locations as the neighbor
-        # elements (from nbe) are the boundary nodes
-        boundary_nodes = grid.nv[grid.nbe[:,ele_idx].nonzero()[0], ele_idx]
-        # The midpoints of the boundary nodes are the start/end of the
-        # transect
-        xm[b], ym[b], hnm[b] = grid.ncoord[:, boundary_nodes-1].mean(axis=1)
-
-    # Now fill in the rest
-    for i,e1,e2 in zip(range(1, len(eles)), eles[:-1], eles[1:]):
-        # These are the common nodes between the neighbor elements
-        which_prev_nei = (grid.nbe[:, e1 - 1] == e2).nonzero()[0]
-        non_nei_idxs = (np.arange(3) != which_prev_nei).nonzero()[0]
-        common_nodes = grid.nv[non_nei_idxs, e1 - 1]
-        xm[i], ym[i], hnm[i] = grid.ncoord[:, common_nodes-1].mean(axis=1)
-
-    # Calculate the up-estuary unit vectors that define the flux surface
-    # for each element
-    ns1 = np.zeros((len(eles), 2))
-    ns2 = np.zeros((len(eles), 2))
-    # Vector from the centroid to the previous midpoint
-    dx1 = xm[:-1] - ele_xs
-    dy1 = ym[:-1] - ele_ys
-    th1 = np.arctan2(-dy1, -dx1)
-    th1 = (np.where(th1 < 0, th1 + 2 * np.pi, th1) - np.pi / 2) % (2 * np.pi)
-    # Vector from the centroid to the next midpoint
-    dx2 = xm[1:] - ele_xs
-    dy2 = ym[1:] - ele_ys
-    th2 = np.arctan2(dy2, dx2)
-    th2 = (np.where(th2 < 0, th2 + 2 * np.pi, th2) - np.pi / 2) % (2 * np.pi)
-    # Vector from previous to next midpoint (completes a triangle)
-    dx3 = xm[1:] - xm[:-1]
-    dy3 = ym[1:] - ym[:-1]
-    # Calculate the unit normal of the third vector, pointing to the right
-    th3 = np.arctan2(dy3, dx3)
-    # Adjust bounds to be [0..2pi]
-    th3 = np.where(th3 < 0, th3 + 2 * np.pi, th3)
-    # Standardize the unit vector to point to the right of (dx3, dy3)
-    th3 = (th3 - np.pi / 2) % (2 * np.pi)
-    # If there's a direction override to the left, adjust the angle so
-    # it points in the correct direction
     if 'upesty' in config and config['upesty'] == 'l':
-        th1 += np.pi
-        th2 += np.pi
-        th3 += np.pi
-    # Save the x/y coordinates of the unit vector
-    ns1[:,0] = np.cos(th1)
-    ns1[:,1] = np.sin(th1)
-    ns2[:,0] = np.cos(th2)
-    ns2[:,1] = np.sin(th2)
+        waypoints = waypoints[::-1]
+    transect = Transect.shortest(grid, waypoints)
+
+    logger.debug(name, transect.eles)
+
+    ele_xs, ele_ys, ele_hs = tuple(grid.elcoord[:,transect.eles-1])
 
     # Compute the average depth of cell centers
     # Shape is (siglay, len(eles))
-    z0 = np.expand_dims(zz, 1) @ np.expand_dims(ele_hs, 0)
-    # Compute the horizontal dimension of each flow section
-    # Shape is (len(eles),)
-    a = (np.sqrt((xm[1:] - ele_xs) ** 2 + (ym[1:] - ele_ys) ** 2) +
-        np.sqrt((ele_xs - xm[:-1]) ** 2 + (ele_ys - ym[:-1]) ** 2))
+    z0 = np.expand_dims(depthcoord.zz[:-1], 1) @ np.expand_dims(ele_hs, 0)
     # Compute the vertical thickness of each depth layer
     # Shape is (siglay, len(eles))
-    zthick = np.expand_dims(z[:-1] - z[1:], 1) @ np.expand_dims(ele_hs, 0)
+    zthick = np.expand_dims(depthcoord.dz, 1) @ np.expand_dims(ele_hs, 0)
+    a = transect.a
     da0 = a * zthick
 
     # Two more things to calculate:
@@ -438,10 +367,10 @@ def build_section(name, config, grid, z, zz, ele_adj_dict):
     # pinv matrix for each element's neighbor or midpoint coordinates
     # (needed to compute velocity field inside element; see eq's 3.20 and
     # 3.21 of the FVCOM manual)
-    allneis = (grid.nbe[:,eles-1] - 1).T
+    allneis = (grid.nbe[:,transect.eles-1] - 1).T
     elneis = []
     pinvs = []
-    for i,(el,neis) in enumerate(zip(eles, allneis)):
+    for i,(el,neis) in enumerate(zip(transect.eles, allneis)):
         neis = neis[neis > -1]
         elneis.append(neis)
         dxy = (grid.elcoord[0:2, neis].T -
@@ -454,19 +383,11 @@ def build_section(name, config, grid, z, zz, ele_adj_dict):
         pinvs.append(np.linalg.pinv(dxy))
 
     return {
-        "eles": eles,
+        "transect": transect,
         "neis": elneis,
         "xypinv": pinvs,
-        "x": ele_xs,
-        "y": ele_ys,
         "h": ele_hs,
-        "xm": xm,
-        "ym": ym,
-        "n1": ns1,
-        "n2": ns2,
-        "hm": hnm,
         "z0": z0,
-        "a": a,
         "da0": da0
     }
 
@@ -521,12 +442,10 @@ def start_netcdf(ds, out_fn, NT, sectiondata, NZ, Lon, Lat, Ldir, vn_list=('salt
     units_dict['z0'] = 'm'
     long_name_dict['DA0'] = 'cell area on sigma-grid with zeta=0'
     units_dict['DA0'] = 'm2'
-    long_name_dict['n'] = 'normal unit vector components in up-estuary direction'
-    units_dict['n'] = 'none'
 
     # initialize netcdf output file
     foo = Dataset(out_fn, 'w')
-    foo.createDimension('xi_sect', sectiondata['eles'].size)
+    foo.createDimension('xi_sect', sectiondata['transect'].size)
     foo.createDimension('s_z', NZ)
     foo.createDimension('ocean_time', NT)
     foo.createDimension('sdir_str', 2)
@@ -555,18 +474,11 @@ def start_netcdf(ds, out_fn, NT, sectiondata, NZ, Lon, Lat, Ldir, vn_list=('salt
         v_var = foo.createVariable(vv, float, ('ocean_time', 'xi_sect'))
         v_var.long_name = 'Free Surface Height'
         v_var.units = 'm'
-    for vv in ['n']:
-        v_var = foo.createVariable(vv, float, ('xi_sect', 'xy'))
-        v_var.long_name = long_name_dict[vv]
-        v_var.units = units_dict[vv]
 
     # add static variables
     foo['lon'][:] = Lon
     foo['lat'][:] = Lat
-    foo['ele'][:] = sectiondata['eles']
-    bisectors = sectiondata['n1'] + sectiondata['n2']
-    foo['n'][:] = (bisectors.T /
-            np.sqrt(bisectors[:,0] ** 2 + bisectors[:,1] ** 2)).T
+    foo['ele'][:] = sectiondata['transect'].eles
 
     # add global attributes
     foo.gtagex = Ldir['gtagex']
@@ -579,12 +491,16 @@ def plot_locations(ax, grid, sections_gdf, sectiondata, all_x=None, all_y=None):
     p = sections_gdf.plot(ax=ax, color='tab:red', zorder=2)
     # Add up-estuary flow direction arrows
     for sect in sectiondata.values():
-        ax.quiver((sect['x'] + sect['xm'][:-1]) / 2,
-                (sect['y'] + sect['ym'][:-1]) / 2, sect['n1'][:,0],
-                sect['n1'][:,1], zorder=3, alpha=0.7)
-        ax.quiver((sect['x'] + sect['xm'][1:]) / 2,
-                (sect['y'] + sect['ym'][1:]) / 2, sect['n2'][:,0],
-                sect['n2'][:,1], zorder=3, alpha=0.7)
+        transect = sect['transect']
+        xys = transect.ele_xys
+        ax.quiver((xys[0] + transect.midpoints[0,:-1]) / 2,
+                (xys[1] + transect.midpoints[1,:-1]) / 2,
+                transect.ns1[:,0], transect.ns1[:,1],
+                zorder=3, alpha=0.7)
+        ax.quiver((xys[0] + transect.midpoints[0,1:]) / 2,
+                (xys[1] + transect.midpoints[1,1:]) / 2,
+                transect.ns2[:,0], transect.ns2[:,1],
+                zorder=3, alpha=0.7)
     xmin, xmax, ymin, ymax = p.axis()
     if len(sections_gdf) == 1:
         # Zoom out a bit and adjust the aspect ratio
@@ -628,12 +544,11 @@ def make_plots(indata, sections, outdir):
     if not os.path.isdir(dir_name):
         os.mkdir(dir_name)
 
-    grid = FvcomGrid(np.array([indata['x'][:],indata['y'][:],indata['h'][:]]),
-            indata['nv'][:].astype(int))
-    z = indata['siglev'][:]
+    grid = list(sections.values())[0]['transect'].grid
+    depthcoord = DepthCoordinate.from_output(indata, grid=grid)
 
     section_plot_nameconf = partial(make_section_plot, outdir=outdir,
-            grid=grid, z=z)
+            depthcoord=depthcoord)
     # make_section_plot seems to spawn two additional subthreads that don't
     # tax the CPU heavily. So the number of pool tasks is reduced to
     # whichever is smaller: MAX_JOBS or one third of the total number of
@@ -680,14 +595,13 @@ class SectionFormatter(ticker.ScalarFormatter):
         else:
             return super().__call__(x, pos=(None if pos is None else pos))
 
-def make_section_plot(name, sectiondata, outdir, grid, z):
+def make_section_plot(name, sectiondata, outdir, depthcoord):
+    transect = sectiondata['transect']
     # Interweave the x/y and xm/ym arrays
-    sect_x = np.zeros(sectiondata['x'].size + sectiondata['xm'].size)
+    sect_x = np.zeros(transect.eles.size + transect.midpoints.shape[1])
     sect_y = np.zeros_like(sect_x)
-    sect_x[0::2] = sectiondata['xm']
-    sect_x[1::2] = sectiondata['x']
-    sect_y[0::2] = sectiondata['ym']
-    sect_y[1::2] = sectiondata['y']
+    sect_x[0::2], sect_y[0::2] = tuple(transect.midpoints[0:2,:])
+    sect_x[1::2], sect_y[1::2] = tuple(transect.ele_xys)
     # Create a GeoDataFrame for the section with a LineString geometry
     geom = LineString([(x, y) for x, y in zip(sect_x, sect_y)])
     gdf = gpd.GeoDataFrame({'name': [name], 'geometry': [geom]},
@@ -714,24 +628,15 @@ def make_section_plot(name, sectiondata, outdir, grid, z):
 
     # Compute distances between each element along the transect, for the
     # salinity contour
-    # Start with the legs from the previous midpoint to the centroid
-    center_dists = np.sqrt((sectiondata['x'] - sectiondata['xm'][:-1]) ** 2 +
-            (sectiondata['y'] - sectiondata['ym'][:-1]) ** 2)
-    # Now add the legs from the previous centroid to the previous midpoint
-    # (for all elements after the first one)
-    center_dists[1:] += np.sqrt(
-            (sectiondata['xm'][1:-1] - sectiondata['x'][:-1]) ** 2 +
-            (sectiondata['ym'][1:-1] - sectiondata['y'][:-1]) ** 2)
-    # Create a running total
-    xsect = np.cumsum(center_dists) / 1000
+    xsect = transect.center_dists()
 
     # For the colormesh edges: create a running distance for the section
     # midpoints
-    dists = np.cumsum(sectiondata['a']) / 1000
+    dists = np.cumsum(transect.a) / 1000
     dists = np.concatenate(([0], dists))
 
     # Create a 2D array for the vertical edges of each cell
-    depth_edges = z[:,np.newaxis] @ sectiondata['hm'][np.newaxis,:]
+    depth_edges = depthcoord.z[:,np.newaxis] @ transect.midpoints[2][np.newaxis,:]
 
     for mm,dt_mo in dt_ser.groupby(lambda i: i.month):
         it0 = dt_mo[0]
@@ -768,8 +673,8 @@ def make_section_plot(name, sectiondata, outdir, grid, z):
 
         # Add section location map
         ax = fig.add_subplot(122)
-        plot_locations(ax, grid, gdf, {name: sectiondata})
-        for lbl,x,y in zip(('A','B'),sectiondata['xm'][[0,-1]],sectiondata['ym'][[0,-1]]):
+        plot_locations(ax, transect.grid, gdf, {name: sectiondata})
+        for lbl,x,y in zip(('A','B'),transect.midpoints[0,[0,-1]], transect.midpoints[1,[0,-1]]):
             ax.annotate(lbl, xy=(x, y), ha='center', va='center',
                     path_effects=[pe.withStroke(linewidth=3, foreground='white',
                         alpha=0.6)])

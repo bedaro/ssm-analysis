@@ -229,3 +229,14 @@ class FvcomGrid:
             adj_dict[n3] |= set((n1, n2))
         return adj_dict
 
+    def el_neis(self):
+        """Calculates the neighbors of all elements as an adjacency adj_dict
+
+        Simple transformation of nbe can also work, but nbe contains
+        zeros for boundary elements. This would confuse a graph system
+        like NetworkX."""
+
+        ele_adj_dict = dict()
+        for i,els in enumerate(self.nbe.T,1):
+            ele_adj_dict[i] = els[els > 0]
+        return ele_adj_dict
