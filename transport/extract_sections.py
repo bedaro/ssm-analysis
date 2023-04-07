@@ -14,9 +14,10 @@ TODO
 import time
 from datetime import datetime
 import os
+import sys
 import psutil
 import logging
-import requests
+import itertools
 from argparse import ArgumentParser, Namespace
 from configparser import ConfigParser
 from multiprocessing import Pool
@@ -34,6 +35,7 @@ import matplotlib.pyplot as plt
 from adjustText import adjust_text
 import matplotlib.patheffects as pe
 from matplotlib import ticker
+import cmocean
 import contextily as cx
 from fvcom.grid import FvcomGrid
 from fvcom.depth import DepthCoordinate
@@ -47,6 +49,8 @@ def chunks(lst, n):
     for i in range(0, len(lst), n):
         yield lst[i:i+n]
 
+MAX_JOBS = min(len(os.sched_getaffinity(0)), psutil.cpu_count(logical=False))
+
 def main():
     global MAX_JOBS
     parser = ArgumentParser(description="Extract sections of transport and tracer values.")
@@ -59,10 +63,9 @@ def main():
             help="Process this many model NetCDF files at once")
     parser.add_argument("-p", "--make-plots", action="store_true",
             dest="make_plots", help="Generate plots of the transects")
-    # FIXME make this default as it's more accurate
-    parser.add_argument("-u", "--uniform-velocity", action="store_true",
-            dest="uniform_velocity",
-            help="Assume spatially uniform velocity within each element")
+    parser.add_argument("-n", "--nonuniform-velocity", action="store_true",
+            dest="nonuniform_velocity",
+            help="Assume nonuniform velocity within each element")
     parser.add_argument("-x", "--ex_name", type=str,
             help="Experiment name")
     parser.add_argument("-d", "--output-start-date", type=str,
@@ -75,13 +78,13 @@ def main():
             help="Date for the end of extraction")
     parser.add_argument("-v", "--verbose", action="store_true",
             help="Print progress messages during the extraction")
+    parser.add_argument("-s", "--statevars", nargs="*",
+            help="Extract additional state variables by name(s)")
     # TODO implement caching option for performance on Klone
 
-    parser.set_defaults(chunk_size=4, max_jobs=min(
-                len(os.sched_getaffinity(0)), psutil.cpu_count(logical=False)
-            ), date_string0='none', date_string1='none', ex_name='untitled',
+    parser.set_defaults(chunk_size=4, date_string0='none', date_string1='none', ex_name='untitled',
             output_start_date='2014.01.01', verbose=False, make_plots=False,
-            uniform_velocity=False)
+            nonuniform_velocity=False)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
 
@@ -92,7 +95,8 @@ def main():
     if not os.path.isdir(root):
         os.mkdir(root)
 
-    MAX_JOBS = args.max_jobs
+    if args.max_jobs is not None:
+        MAX_JOBS = args.max_jobs
 
     do_extract(args.incdf, config, args.outdir, **vars(args))
 
@@ -109,9 +113,6 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
     logger = root_logger.getChild('do_extract')
     args = Namespace(**kwargs)
     indata = MFDataset(exist_cdfs) if len(exist_cdfs) > 1 else Dataset(exist_cdfs[0])
-    # Suppress warnings
-    indata['siglay'].set_auto_mask(False)
-    indata['siglev'].set_auto_mask(False)
 
     logger.info("Building sections")
     sect_start = time.perf_counter()
@@ -124,15 +125,30 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
     sd = datetime.strptime(args.output_start_date, '%Y.%m.%d')
     model_dates = pd.Timestamp(sd) + pd.to_timedelta(indata['time'][:], 's')
     model_date_df = pd.DataFrame({"intime": indata['time'][:] }, index=model_dates)
+    # Check for hourly, or at least an even multiple of hourly, output
+    dt = indata['time'][4] - indata['time'][3]
+    times_per_hr = 3600 / dt
+    if not times_per_hr.is_integer():
+        logger.error(f"Model output interval is {dt} sec but needs to be n per hour")
+        sys.exit(1)
+    else:
+        times_per_hr = int(times_per_hr)
+
     # Convert these times to UNIX timestamps to match Parker's convention
     # See https://stackoverflow.com/a/40881958
     model_date_df['ocean_time'] = model_dates.values.astype(np.int64) / 10 ** 9
+    # Construct an indexer to pick which time variable indices we're going
+    # to extract, ensuring hourly output within the time ranges given
+    date_indexer = np.zeros_like(model_dates, dtype=bool)
+    date_indexer[times_per_hr-1::times_per_hr] = True
     if args.date_string0 != 'none':
         dt0 = datetime.strptime(args.date_string0, '%Y.%m.%d')
+        date_indexer &= model_dates >= dt0
     else:
         dt0 = sd
     if args.date_string1 != 'none':
         dt1 = datetime.strptime(args.date_string1, '%Y.%m.%d')
+        date_indexer &= model_dates <= dt1
     else:
         dt1 = model_dates[-1].to_pydatetime()
     meta = {
@@ -141,8 +157,7 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
             'gtagex': args.ex_name
     }
     # Get the indices of the time variable from the model output to extract
-    time_range = model_date_df.loc[(model_date_df.index >= dt0) &
-            (model_date_df.index <= dt1), ['intime','ocean_time']]
+    time_range = model_date_df.loc[date_indexer, ['intime','ocean_time']]
     logger.info(f'Need to extract data for {len(time_range)} times')
 
     logger.info("Creating NetCDF output files")
@@ -162,9 +177,21 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
             os.mkdir(out_dir)
 
         latlons = np.array(section_eles_gdf.loc[name, "geometry"].coords)
+        sncargs = {}
+        if args.statevars is not None and len(args.statevars) > 0:
+            if args.statevars[0] == 'all':
+                vn_list = []
+                # all time-varying 3D variables on the siglay/node grid
+                for vv in indata.variables:
+                    if indata.variables[vv].dimensions == ('time','siglay','node'):
+                        vn_list.append('salt' if vv == 'salinity' else vv)
+                sncargs['vn_list'] = vn_list
+            else:
+                sncargs['vn_list'] = ['salt'] + args.statevars
+            logger.info(f"statevars: {sncargs['vn_list']}")
         outds = start_netcdf(indata, out_fn, len(time_range),
                 section, indata.dimensions['siglay'].size,
-                latlons[:,0], latlons[:,1], meta)
+                latlons[:,0], latlons[:,1], meta, **sncargs)
         # Populate simple fields
         outds['ocean_time'][:] = time_range['ocean_time']
         outds['h'][:] = section['h']
@@ -195,8 +222,8 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
         data_size = 0
         with Pool(MAX_JOBS) as p:
             partial_fn = partial(copy_data, infiles=cdfchunk,
-                    time_range=times_available, output_dir=output_dir,
-                    uniform=args.uniform_velocity)
+                    time_range=times_available, per_hr=times_per_hr,
+                    output_dir=output_dir, uniform=~args.nonuniform_velocity)
             data_size = np.sum(p.starmap(partial_fn, sections.items()))
 
         i += chunk_times
@@ -210,13 +237,14 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
     if args.make_plots:
         logger.info("Generating plots")
         start_time = time.perf_counter()
-        make_plots(indata, sections, output_dir)
+        make_plots(indata, {n: s["transect"] for n,s in sections.items()},
+                output_dir)
         elapsed = time.perf_counter() - start_time
         logger.info(f'Plot generation completed in {elapsed:.1f} secs')
     indata.close()
 
-
-def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
+def copy_data(name, section, infiles, time_range, per_hr, output_dir,
+        uniform=True):
     indata = MFDataset(infiles) if len(infiles) > 1 else Dataset(infiles[0])
     bytes_written = 0
 
@@ -224,7 +252,8 @@ def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
     times_out = time_range['ocean_time']
     tin_slc = slice(
             (indata['time'][:] == times_in[0]).nonzero()[0][0],
-            (indata['time'][:] == times_in[-1]).nonzero()[0][0]+1)
+            (indata['time'][:] == times_in[-1]).nonzero()[0][0]+1,
+            per_hr)
 
     out_fn = EXTRACTION_OUT_PATH.format(outdir=output_dir, name=name)
     outds = Dataset(out_fn, 'a')
@@ -232,6 +261,7 @@ def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
     tout_slc = slice(
             (outds['ocean_time'][:] == times_out[0]).nonzero()[0][0],
             (outds['ocean_time'][:] == times_out[-1]).nonzero()[0][0]+1)
+    statevars = outds.vn_list.split(",")
 
     transect = section['transect']
 
@@ -243,9 +273,11 @@ def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
         ])).astype(int)
     for n in all_sect_nodes:
         node_scalar_cache[n] = {
-                'salt': indata['salinity'][tin_slc,:,n-1],
                 'zeta': indata['zeta'][tin_slc,n-1]
         }
+        for statevar in statevars:
+            inname = 'salinity' if statevar == 'salt' else statevar
+            node_scalar_cache[n][statevar] = indata[inname][tin_slc,:,n-1]
 
     for i,(ele,neis,xy,h,n1,n2,mxy1,mxy2,pinv,da0) in enumerate(zip(
             transect.eles, section['neis'], transect.ele_xys.T,
@@ -254,11 +286,12 @@ def copy_data(name, section, infiles, time_range, output_dir, uniform=False):
             section['xypinv'], section['da0'].T)):
         # Average scalar values from the nodes belonging to this element
         mynodes = indata['nv'][:,ele-1].astype(int)
-        salt = np.mean(
-                [node_scalar_cache[node]['salt'] for node in mynodes],
-                axis=0)
-        outds['salt'][tout_slc,:,i] = salt
-        bytes_written += salt.size * salt.itemsize
+        for s in statevars:
+            data = np.mean(
+                    [node_scalar_cache[node][s] for node in mynodes],
+                    axis=0)
+            outds[s][tout_slc,:,i] = data
+            bytes_written += data.size * data.itemsize
         zeta = np.mean(
                 [node_scalar_cache[node]['zeta'] for node in mynodes],
                 axis=0)
@@ -405,14 +438,6 @@ def start_netcdf(ds, out_fn, NT, sectiondata, NZ, Lon, Lat, Ldir, vn_list=('salt
         os.remove(out_fn)
     except OSError:
         pass # assume error was because the file did not exist
-    # generating some lists
-    if vn_list == 'all':
-        vn_list = []
-        # all time-varying 3D variables on the siglay/node grid
-        for vv in ds.variables:
-            vdim = ds.variables[vv].dimensions
-            if 'time' in vdim and 'siglay' in vdim and 'node' in vdim:
-                vn_list.append(vv)
     # and some dicts of long names and units
     long_name_dict = dict()
     units_dict = dict()
@@ -484,14 +509,14 @@ def start_netcdf(ds, out_fn, NT, sectiondata, NZ, Lon, Lat, Ldir, vn_list=('salt
     foo.gtagex = Ldir['gtagex']
     foo.date_string0 = Ldir['date_string0']
     foo.date_string1 = Ldir['date_string1']
+    foo.vn_list = ",".join(vn_list)
 
     return foo
 
-def plot_locations(ax, grid, sections_gdf, sectiondata, all_x=None, all_y=None):
+def plot_locations(ax, grid, sections_gdf, transects):
     p = sections_gdf.plot(ax=ax, color='tab:red', zorder=2)
     # Add up-estuary flow direction arrows
-    for sect in sectiondata.values():
-        transect = sect['transect']
+    for transect in transects.values():
         xys = transect.ele_xys
         ax.quiver((xys[0] + transect.midpoints[0,:-1]) / 2,
                 (xys[1] + transect.midpoints[1,:-1]) / 2,
@@ -525,26 +550,28 @@ def plot_locations(ax, grid, sections_gdf, sectiondata, all_x=None, all_y=None):
     ax.set(ybound=(ymin,ymax), xbound=(xmin,xmax), xticklabels=(),
             yticklabels=())
     try:
-        cx.add_basemap(ax, crs=domain_gdf.crs, url=cx.providers.Stamen.TonerLite)
-    except requests.HTTPError as e:
+        cx.add_basemap(ax, crs=domain_gdf.crs, source=cx.providers.Stamen.TonerLite)
+    except Exception as e:
         # Try with a max zoom level
-        cx.add_basemap(ax, crs=domain_gdf.crs, url=cx.providers.Stamen.TonerLite, zoom=13)
+        cx.add_basemap(ax, crs=domain_gdf.crs, source=cx.providers.Stamen.TonerLite, zoom=13)
     if len(sections_gdf) > 1:
         texts = sections_gdf.apply(
                 lambda x: ax.annotate(x['name'], xy=x['geometry'].coords[0],
                     ha='center', va='center',
                     path_effects=[pe.withStroke(linewidth=3, foreground='white',
                         alpha=0.6)]), axis=1)
+        # Extract x and y coordinates from all transect points
+        all_x, all_y = zip(*[c for c in itertools.chain(*[g.coords for g in sections_gdf['geometry']])])
         adjust_text(texts, all_x, all_y, arrowprops=dict(arrowstyle='-'))
 
-def make_plots(indata, sections, outdir):
+def make_plots(indata, transects, outdir):
     """Make model grid and profile plots"""
 
     dir_name = PLOT_ROOT_DIR.format(outdir=outdir)
     if not os.path.isdir(dir_name):
         os.mkdir(dir_name)
 
-    grid = list(sections.values())[0]['transect'].grid
+    grid = list(transects.values())[0].grid
     depthcoord = DepthCoordinate.from_output(indata, grid=grid)
 
     section_plot_nameconf = partial(make_section_plot, outdir=outdir,
@@ -555,16 +582,14 @@ def make_plots(indata, sections, outdir):
     # "CPU's" (which may include threads)
     with Pool(min(MAX_JOBS, int(len(os.sched_getaffinity(0))/3))) as p:
         res = p.starmap(section_plot_nameconf,
-                sections.items())
+                transects.items())
         names = map(lambda x: x[0], res)
-        all_x = np.concatenate([x[1] for x in res])
-        all_y = np.concatenate([x[2] for x in res])
-        sections_gdf = pd.concat([x[3] for x in res], ignore_index=True)
+        sections_gdf = pd.concat([x[1] for x in res], ignore_index=True)
 
-    if len(sections) > 1:
+    if len(transects) > 1:
         # Plot all the sections in overhead view
         fig, ax = plt.subplots(figsize=(6,8))
-        plot_locations(ax, grid, sections_gdf, sections, all_x=all_x, all_y=all_y)
+        plot_locations(ax, grid, sections_gdf, transects)
         ax.set_title("All Sections")
         fig.savefig(dir_name + '/all_sections_map.png')
         plt.close(fig)
@@ -595,15 +620,24 @@ class SectionFormatter(ticker.ScalarFormatter):
         else:
             return super().__call__(x, pos=(None if pos is None else pos))
 
-def make_section_plot(name, sectiondata, outdir, depthcoord):
-    transect = sectiondata['transect']
-    # Interweave the x/y and xm/ym arrays
-    sect_x = np.zeros(transect.eles.size + transect.midpoints.shape[1])
-    sect_y = np.zeros_like(sect_x)
-    sect_x[0::2], sect_y[0::2] = tuple(transect.midpoints[0:2,:])
-    sect_x[1::2], sect_y[1::2] = tuple(transect.ele_xys)
-    # Create a GeoDataFrame for the section with a LineString geometry
-    geom = LineString([(x, y) for x, y in zip(sect_x, sect_y)])
+def plot_statevar(xsect, dists, depth_edges, z0, data, fig=None, ax=None, lbound=None, ubound=None, contour_interval=.2, cmap='rainbow'):
+    if ax is None or fig is None:
+        fig, ax = plt.subplots()
+    if lbound is None:
+        lbound = data.min()
+    if ubound is None:
+        ubound = data.max()
+    cs = ax.pcolormesh(dists, depth_edges, data, vmin=lbound, vmax=ubound, cmap=cmap)
+    fig.colorbar(cs)
+    levels = np.arange(np.floor(lbound), np.ceil(ubound), contour_interval)
+    ax.contour(xsect*np.ones((z0.shape[0],1)), z0, data,
+        levels,
+        colors='black', linewidths=.4)
+    ax.set_ylabel('Depth (m)')
+    return ax
+
+def make_section_plot(name, transect, outdir, depthcoord):
+    geom = transect.to_geom()
     gdf = gpd.GeoDataFrame({'name': [name], 'geometry': [geom]},
             crs='epsg:32610')
 
@@ -618,9 +652,17 @@ def make_section_plot(name, sectiondata, outdir, depthcoord):
     dt_ser = pd.Series(index=dt, data=tind)
     # time variable fields
     q = ds['q'][:]
-    salt = ds['salt'][:]
-    svmin = salt.mean() - 2*salt.std()
-    svmax = salt.mean() + 2*salt.std()
+    statevars = []
+    for s in ds.vn_list.split(","):
+        data = ds[s][:]
+        m = data.mean()
+        std = data.std()
+        statevars.append({
+            'name': s,
+            'data': data,
+            'lbound': m - 2 * std,
+            'ubound': m + 2 * std
+        })
 
     dir_name = os.path.dirname(PLOT_PATH.format(outdir=outdir, name=name, plot=''))
     if not os.path.isdir(dir_name):
@@ -628,7 +670,7 @@ def make_section_plot(name, sectiondata, outdir, depthcoord):
 
     # Compute distances between each element along the transect, for the
     # salinity contour
-    xsect = transect.center_dists()
+    xsect = transect.center_dists() / 1000
 
     # For the colormesh edges: create a running distance for the section
     # midpoints
@@ -644,45 +686,61 @@ def make_section_plot(name, sectiondata, outdir, depthcoord):
 
         # form time means
         qq = q[it0:it1,:].mean(axis=0)
-        ss = salt[it0:it1,:].mean(axis=0)
 
+        nrows = len(statevars) + 1
         # See https://stackoverflow.com/a/65910539/413862 for how num and
         # clear prevent memory leaks
-        fig = plt.figure(num=1, figsize=(13,8), clear=True)
+        fig = plt.figure(num=1, figsize=(13,nrows*4), clear=True)
 
         # Modified from Parker's code to use flat shading instead of nearest,
-        # as this produces more accurately outer edges.
-        ax = fig.add_subplot(221)
+        # as this produces more accurate outer edges.
+        ax = fig.add_subplot(nrows, 2, 1)
         cs = ax.pcolormesh(dists, depth_edges, 100*qq/da0, vmin=-10, vmax=10, cmap='bwr')
         fig.colorbar(cs)
         ax.set(title='Mean Velocity (cm/s) Month = ' + str(mm),
                 ylabel='Depth (m)',xbound=(0,dists[-1]), xticklabels=())
         ax.xaxis.set_major_locator(SectionLocator())
 
-        ax = fig.add_subplot(223)
-        cs = ax.pcolormesh(dists, depth_edges, ss, vmin =svmin, vmax=svmax, cmap='rainbow')
-        fig.colorbar(cs)
-        contour_interval = .2
-        ax.contour(xsect*np.ones((z0.shape[0],1)), z0, ss,
-            np.arange(0,35,contour_interval), colors='black', linewidths=.4)
-        ax.set(title='Mean Salinity (C.I. = %0.1f)' % (contour_interval),
-            xlabel='Transect Distance (km)', ylabel='Depth (m)',
-            xbound=(0,dists[-1]))
-        ax.xaxis.set_major_locator(SectionLocator())
-        ax.xaxis.set_major_formatter(SectionFormatter())
+        for i,s in enumerate(statevars):
+            data = s['data'][it0:it1,:].mean(axis=0)
+            ax = fig.add_subplot(nrows, 2, 2*i+3)
+            plotargs = {
+                'ax': ax,
+                'fig': fig,
+                'lbound': s['lbound'],
+                'ubound': s['ubound']
+            }
+            if s['name'] == 'salt':
+                title = 'Salinity'
+                plotargs['cmap'] = cmocean.cm.haline
+            elif s['name'] == 'no23' or s['name'] == 'nh4':
+                title = 'Nitrate/ite' if s['name'] == 'no23' else 'Ammonium'
+                plotargs['cmap'] = 'summer_r'
+            elif s['name'] == 'DOXG':
+                title = 'DO'
+                plotargs['cmap'] = 'coolwarm_r'
+            plot_statevar(xsect, dists, depth_edges, z0, data, **plotargs)
+
+            ax.set(title=f'Mean {title} (C.I. = 0.2)', xbound=(0,dists[-1]))
+            ax.xaxis.set_major_locator(SectionLocator())
+            if i + 1 == len(statevars):
+                ax.set_xlabel('Transect Distance (km)')
+                ax.xaxis.set_major_formatter(SectionFormatter())
 
         # Add section location map
         ax = fig.add_subplot(122)
-        plot_locations(ax, transect.grid, gdf, {name: sectiondata})
+        plot_locations(ax, transect.grid, gdf, {name: transect})
         for lbl,x,y in zip(('A','B'),transect.midpoints[0,[0,-1]], transect.midpoints[1,[0,-1]]):
             ax.annotate(lbl, xy=(x, y), ha='center', va='center',
-                    path_effects=[pe.withStroke(linewidth=3, foreground='white',
-                        alpha=0.6)])
+                    path_effects=[pe.withStroke(linewidth=3,
+                        foreground='white', alpha=0.6)],
+                        fontsize='large', fontweight='bold')
         nnnn = ('0000' + str(mm))[-4:]
         plotname = 'plot_' + nnnn
-        fig.savefig(PLOT_PATH.format(outdir=outdir, name=name, plot=plotname))
+        fig.savefig(PLOT_PATH.format(outdir=outdir, name=name,
+            plot=plotname))
 
     ds.close()
-    return name, sect_x, sect_y, gdf
+    return name, gdf
 
 if __name__ == "__main__": main()
