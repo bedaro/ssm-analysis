@@ -1,1 +1,1 @@
-__all__ = ["grid", "depth", "transect"]
+__all__ = ["grid", "depth", "transect", "control_volume"]

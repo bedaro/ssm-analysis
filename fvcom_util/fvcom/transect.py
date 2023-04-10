@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import networkx as nx
+from shapely.geometry import LineString
 
 from .grid import FvcomGrid
 
@@ -159,3 +160,13 @@ class Transect:
         center_dists[1:] += np.sqrt(((self.midpoints[0:2,1:-1] - self.ele_xys[:,:-1]) ** 2).sum(axis=0))
         # Create a running total
         return np.cumsum(center_dists)
+
+    def to_geom(self):
+        """Create a LineString geometry of the transect"""
+        # Interweave the x/y and xm/ym arrays
+        sect_x = np.zeros(self.eles.size + self.midpoints.shape[1])
+        sect_y = np.zeros_like(sect_x)
+        sect_x[0::2], sect_y[0::2] = tuple(self.midpoints[0:2,:])
+        sect_x[1::2], sect_y[1::2] = tuple(self.ele_xys)
+        # Create a GeoDataFrame with a LineString geometry
+        return LineString([(x, y) for x, y in zip(sect_x, sect_y)])
