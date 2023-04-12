@@ -59,6 +59,7 @@ class Validator:
             query += "ORDER BY datetime, depth"
 
             obsdata = pd.read_sql(query, con=self.engine, params=query_params, index_col='id')
+            obsdata['datetime'] = pd.to_datetime(obsdata['datetime'],utc=True)
             # This is more efficient than querying it from the DB
             obsdata['parameter_id'] = param
 
