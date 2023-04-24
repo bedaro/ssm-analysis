@@ -23,8 +23,26 @@ class ControlVolume:
 
     @property
     def nodes(self):
-        """The nodes property."""
+        """The set of all nodes in CV."""
         return self._nodes
+
+    @property
+    def area(self):
+        """The total CV area."""
+        return self.grid.tces_gdf().loc[list(self._nodes), 'geometry'].area.sum()
+
+    def plot(self, **kwargs):
+        grid_els = self.grid.elements_gdf()
+        args1 = kwargs.copy()
+        args1['color'] = 'gray'
+        if 'ax' in kwargs:
+            grid_els.plot(**args1)
+        else:
+            ax = grid_els.plot(**args1)
+            kwargs['ax'] = ax
+        grid_tces = self.grid.tces_gdf()
+        grid_tces.loc[list(self._nodes)].plot(**kwargs)
+        return ax
 
     def _calc_nodes(self):
         border_nodes = [t.get_nodes() for t in self.transects]
