@@ -169,6 +169,19 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
     section_eles_gdf = gpd.GeoDataFrame(data, columns=("name", "geometry"),
             crs='epsg:32610').set_index('name').to_crs('epsg:4326')
 
+    sncargs = {}
+    if args.statevars is not None and len(args.statevars) > 0:
+        if args.statevars[0] == 'all':
+            vn_list = []
+            # all time-varying 3D variables on the siglay/node grid
+            for vv in indata.variables:
+                if indata.variables[vv].dimensions == ('time','siglay','node'):
+                    vn_list.append('salt' if vv == 'salinity' else vv)
+            sncargs['vn_list'] = tuple(vn_list)
+        else:
+            sncargs['vn_list'] = ('salt',) + tuple(args.statevars)
+        logger.info(f"statevars: {sncargs['vn_list']}")
+
     for name,section in sections.items():
         meta['section_name'] = name
         out_fn = EXTRACTION_OUT_PATH.format(outdir=output_dir, name=name)
@@ -177,18 +190,6 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
             os.mkdir(out_dir)
 
         latlons = np.array(section_eles_gdf.loc[name, "geometry"].coords)
-        sncargs = {}
-        if args.statevars is not None and len(args.statevars) > 0:
-            if args.statevars[0] == 'all':
-                vn_list = []
-                # all time-varying 3D variables on the siglay/node grid
-                for vv in indata.variables:
-                    if indata.variables[vv].dimensions == ('time','siglay','node'):
-                        vn_list.append('salt' if vv == 'salinity' else vv)
-                sncargs['vn_list'] = vn_list
-            else:
-                sncargs['vn_list'] = ['salt'] + args.statevars
-            logger.info(f"statevars: {sncargs['vn_list']}")
         outds = start_netcdf(indata, out_fn, len(time_range),
                 section, indata.dimensions['siglay'].size,
                 latlons[:,0], latlons[:,1], meta, **sncargs)
@@ -708,20 +709,27 @@ def make_section_plot(name, transect, outdir, depthcoord):
                 'ax': ax,
                 'fig': fig,
                 'lbound': s['lbound'],
-                'ubound': s['ubound']
+                'ubound': s['ubound'],
+                'contour_interval': 0.2
             }
             if s['name'] == 'salt':
-                title = 'Salinity'
+                title = 'Salinity, psu'
                 plotargs['cmap'] = cmocean.cm.haline
-            elif s['name'] == 'no23' or s['name'] == 'nh4':
-                title = 'Nitrate/ite' if s['name'] == 'no23' else 'Ammonium'
+            elif s['name'] == 'NO3':
+                title = 'Nitrate+ite. mg/l'
+                plotargs['contour_interval'] = 0.02
+                plotargs['cmap'] = 'summer_r'
+            elif s['name'] == 'NH4':
+                title = 'Ammonium, mg/l'
+                plotargs['contour_interval'] = 0.002
                 plotargs['cmap'] = 'summer_r'
             elif s['name'] == 'DOXG':
-                title = 'DO'
+                title = 'DO, mg/l'
                 plotargs['cmap'] = 'coolwarm_r'
             plot_statevar(xsect, dists, depth_edges, z0, data, **plotargs)
 
-            ax.set(title=f'Mean {title} (C.I. = 0.2)', xbound=(0,dists[-1]))
+            ax.set(title=f"Mean {title} (C.I. = {plotargs['contour_interval']})",
+                   xbound=(0,dists[-1]))
             ax.xaxis.set_major_locator(SectionLocator())
             if i + 1 == len(statevars):
                 ax.set_xlabel('Transect Distance (km)')
