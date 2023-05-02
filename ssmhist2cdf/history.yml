@@ -11,8 +11,6 @@
 # opportunity to read them, and the NetCDF variable will be appropriately
 # dimensioned. All other keys are added as attributes to the NetCDF
 # variable.
-state_vars: 42
-state_vars_bottom: 94
 output_indices:
   0:
     variable: 'h'
@@ -60,7 +58,7 @@ output_indices:
     long_name: 'phosphate'
     units: 'gP meters-3'
   11:
-    variable: 'netPP'
+    variable: 'netPPtot'
     long_name: 'total net primary production'
     units: 'gC meters-2'
     per_layer: false
@@ -72,6 +70,10 @@ output_indices:
 #    variable: 'salinity'
 #    long_name: 'salinity'
 #    units: '1e-3'
+  14:
+    variable: 'IAVG'
+    long_name: 'IAVG'
+    units: 'Einstein meters-2 day-1'
 #  15:
 #    variable: 'RDOC'
 #    long_name: 'refractory dissolved organic carbon'
@@ -83,6 +85,14 @@ output_indices:
 #  17:
 #    variable: 'RPOC'
 #    long_name: 'refractory particulate organic carbon'
+#    units: 'gC meters-3'
+#  18:
+#    variable: 'GPP'
+#    long_name: 'gross primary production'
+#    units: 'gC meters-3'
+#  19:
+#    variable: 'NPP'
+#    long_name: 'net primary production'
 #    units: 'gC meters-3'
   20:
     variable: 'TDIC'
@@ -100,3 +110,19 @@ output_indices:
     variable: 'pCO2'
     long_name: 'carbon dioxide partial pressure'
     units: 'ppmv'
+# 24: DICUPT_GL
+# 25: DICBMP_GL
+# 26: DICPRD_GL
+# 27: DICMNL_GL
+# 28: DICDEN_GL
+# 29: DICGAS_GL
+# 30: DICSED_GL
+# 31: TDIC flux
+# 32: VDIFFLUX_GL
+# 33: ALKNH4_GL
+# 34: ALKNO3_GL
+# 35: ALKNIT_GL
+# 36: ALKDEN_GL
+# 37: ALKREM_GL
+# 38: ALKNO3SED_GL
+# 39: TALK flux
