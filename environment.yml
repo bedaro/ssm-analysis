@@ -27,4 +27,5 @@ dependencies:
   - shapely
   - networkx
   - joblib
+  - py2dm
 prefix: /home/benr/mambaforge/envs/ssm-analysis

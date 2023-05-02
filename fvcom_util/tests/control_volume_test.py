@@ -30,24 +30,27 @@ class ControlVolumeTest(unittest.TestCase):
         """Make a single transect across the unified channel"""
         transect = Transect(self.grid, np.array([2,4,3]))
         cv = ControlVolume([transect])
-        self.assertEqual(cv.nodes, set([1,2,3]))
+        self.assertEqual(cv.nodes, {1,2,3})
         self.assertEqual(cv.transect_directions(), [True])
+        self.assertAlmostEqual(cv.area, 8/3)
 
     def test_two_transects_closed(self):
         """Make two transects along one side of the channel"""
         tr1 = Transect(self.grid, np.array([14, 18]))
         tr2 = Transect(self.grid, np.array([10, 7]))
         cv = ControlVolume([tr1, tr2])
-        self.assertEqual(cv.nodes, set([8,11,12,15]))
+        self.assertEqual(cv.nodes, {8,11,12,15})
         self.assertEqual(cv.transect_directions(), [True, False])
+        self.assertEqual(cv.area, 4)
 
     def test_two_transects_open(self):
         """Make two transects, one on each side of the channel"""
         tr1 = Transect(self.grid, np.array([8, 9]))
         tr2 = Transect(self.grid, np.array([14, 15]))
         cv = ControlVolume([tr1, tr2])
-        self.assertEqual(cv.nodes, set([1,2,3,4,5,6,7,8,11,12]))
+        self.assertEqual(cv.nodes, {1,2,3,4,5,6,7,8,11,12})
         self.assertEqual(cv.transect_directions(), [True, True])
+        self.assertEqual(cv.area, 11)
 
     def test_three_transects_closed(self):
         """Make three transects enclosing one channel split"""
@@ -57,5 +60,6 @@ class ControlVolumeTest(unittest.TestCase):
         cv = ControlVolume([tr1, tr2, tr3])
         self.assertEqual(cv.nodes, {4,5,6,7,8})
         self.assertEqual(cv.transect_directions(), [False, True, True])
+        self.assertAlmostEqual(cv.area, 19/3)
 
 if __name__ == '__main__': unittest.main()
