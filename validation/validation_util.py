@@ -21,7 +21,6 @@ from scipy.signal import argrelextrema
 import matplotlib.pyplot as plt
 from fvcom.grid import FvcomGrid
 from fvcom.depth import DepthCoordinate
-from fvcom_icm.state import FvcomicmState
 import db
 
 # Dataframe that maps observation database parameter ID to NetCDF variable
@@ -31,6 +30,7 @@ _parameter_map = pd.DataFrame({
     # chla to C ratio
     'param': ('temp','salt','o2','nh4','no23','ph'),
     'output_var': ('temp','salinity','DOXG','NH4','NO3','pH'),
+    # ICM State: temp and salinity are theoretically present but they're all 0's
     'icmstate_var': (0, 1, 26, 12, 13, -1),
     'ecol_var': ('Var_18','Var_19','Var_10','Var_14','Var_15','Var_32')
 }).set_index('param')
@@ -58,7 +58,7 @@ class Validator:
                 query_params.extend(exclude_stations)
             query += "ORDER BY datetime, depth"
 
-            obsdata = pd.read_sql(query, con=self.engine, params=query_params, index_col='id')
+            obsdata = pd.read_sql(query, con=self.engine, params=tuple(query_params), index_col='id')
             obsdata['datetime'] = pd.to_datetime(obsdata['datetime'],utc=True)
             # This is more efficient than querying it from the DB
             obsdata['parameter_id'] = param
@@ -221,7 +221,7 @@ class ModelValidator(Validator):
     def _get_ssh(self, t_slice, n_slice):
         return self.model_output['zeta'][t_slice, n_slice]
 
-class StateValidator(Validator):
+class AbsStateValidator(Validator):
     def __init__(self, state, ts, span=5, engine=None):
         self.state = state
         if not isinstance(ts, pd.Timestamp):
@@ -231,22 +231,11 @@ class StateValidator(Validator):
                 ts + span_delta, engine=engine)
         self.ts = self.start_date + (self.end_date - self.start_date) / 2
 
-    def get_model_match(self, param_id, t_slice, depth_slice, n_slice):
-        # TODO handle pH separately as it must be computed from DIC, TALK and pCO2
-        global _parameter_map
-        # get the C2 constituent index
-        param = _parameter_map.loc[param_id, 'icmstate_var']
-        return self.state.c2[n_slice, depth_slice, param]
-
     def get_times(self, slc=slice(None)):
         return np.array([self.start_date])
 
     def _get_t_indices(self, datetimes):
         return np.zeros_like(datetimes)
-
-    def _get_ssh(self, t_slice, n_slice):
-        # TODO
-        return np.zeros(self.state.grid.m)[n_slice]
 
     def get_obsdata(self, params, **kwargs):
         ret = super().get_obsdata(params, **kwargs)
@@ -282,6 +271,31 @@ class StateValidator(Validator):
         if len(filtered_idxs) > 0:
             filtered_idxs = pd.concat(filtered_idxs, ignore_index=True)
         return obsdata.loc[np.isin(obsdata['cast_id'], filtered_casts) | np.isin(obsdata.index, filtered_idxs)]
+
+class ICMStateValidator(AbsStateValidator):
+
+    def get_model_match(self, param_id, t_slice, depth_slice, n_slice):
+        # TODO handle pH separately as it must be computed from DIC, TALK and pCO2
+        global _parameter_map
+        # get the C2 constituent index
+        param = _parameter_map.loc[param_id, 'icmstate_var']
+        return self.state.c2[n_slice, depth_slice, param]
+
+    def _get_ssh(self, t_slice, n_slice):
+        # TODO
+        return np.zeros(self.state.grid.m)[n_slice]
+
+class FvcomStateValidator(AbsStateValidator):
+
+    def get_model_match(self, param_id, t_slice, depth_slice, n_slice):
+        assert param_id in ['temp','salt']
+        arr = self.state.t1 if param_id == 'temp' else self.state.s1
+        # Need to chop off the last depth index before applying the slice
+        return arr.T[:,:-1][n_slice, depth_slice]
+
+    def _get_ssh(self, t_slice, n_slice):
+        # TODO
+        return np.zeros(self.state.grid.m)[n_slice]
 
 class EcolModelValidator(Validator):
     def __init__(self, start, model_output, grid, end_date=None):

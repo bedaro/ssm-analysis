@@ -8,6 +8,7 @@ import numpy as np
 import numpy.testing as nptest
 
 from fvcom.grid import FvcomGrid
+from fvcom.depth import DepthCoordinate
 from fvcom.state import FvcomState
 
 class TestFvcomState(unittest.TestCase):
@@ -15,8 +16,9 @@ class TestFvcomState(unittest.TestCase):
     def setUp(self):
         self.source_file = 'testdata/re_000001.dat'
         grid = FvcomGrid.from_gridfile("testdata/ssm_grd.dat")
+        dcoord = DepthCoordinate.from_asym_sigma(11, grid)
         # All optional features were off when this restart file was generated
-        self.fvcom_state = FvcomState.read_restart_file(self.source_file, grid, 11)
+        self.fvcom_state = FvcomState.read_restart_file(self.source_file, grid, dcoord)
 
     def test_rewrite(self):
         with NamedTemporaryFile() as f:

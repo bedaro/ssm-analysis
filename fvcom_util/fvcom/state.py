@@ -3,10 +3,11 @@ from scipy.io import FortranFile
 import numpy as np
 
 from .grid import FvcomGrid
+from .depth import DepthCoordinate
 
 @dataclass
 class FvcomState:
-    kb: int     # Number of depth layers
+    dcoord: DepthCoordinate
     grid: FvcomGrid
     iint: int
     u: np.array
@@ -136,7 +137,7 @@ class FvcomState:
 
         Averages node properties to set the element center
         """
-        evar = np.zeros((self.kb, self.grid.n+1), dtype=np.float32)
+        evar = np.zeros((self.dcoord.kb, self.grid.n+1), dtype=np.float32)
         for i in range(self.grid.n):
             # Get the node indices at each vertex of this element
             n1, n2, n3 = [self.grid.nv[j,i] for j in range(3)]
@@ -161,13 +162,14 @@ class FvcomState:
         self.initialized = True
 
     @staticmethod
-    def read_restart_file(restart_file, grid, kb, gotm=False, equi_tide=False,
+    def read_restart_file(restart_file, grid, dcoord, gotm=False, equi_tide=False,
             atmo_tide=False, water_quality=False, dye_release=False):
         """Read a FVCOM 2.7 restart file.
 
         Currently only temperature, salinity, and density arrays are reshaped.
         The rest are read in flat.
         """
+        kb = dcoord.kb
         with FortranFile(restart_file, 'r') as f:
             iint, = f.read_ints(np.int32)
 
@@ -240,7 +242,7 @@ class FvcomState:
                 dye = non
                 dymean = non
 
-        return FvcomState(kb, grid, iint, u, v, w, tke, teps, q2, q2l, l, s,
+        return FvcomState(dcoord, grid, iint, u, v, w, tke, teps, q2, q2l, l, s,
                 t, rho, tmean, smean, rmean, s1, t1, rho1, tmean1, smean1,
                 rmean1, km, kh, kq, ua, va, el1, et1, h1, d1, dt1, rtp, el,
                 et, h, d, dt, el_eqi, el_atmo, wqm, dye, dymean, gotm=gotm,
