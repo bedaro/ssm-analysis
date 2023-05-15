@@ -2,14 +2,11 @@
 """
 Plot bulk fluxes as a time series.
 """
-import os, sys
+from argparse import ArgumentParser
+import os
 from multiprocessing import Pool
 import Lfun
 import zfun
-Ldir = Lfun.Lstart()
-
-sys.path.append(os.path.abspath(Ldir['LO'] + 'plotting'))
-import pfun
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,44 +16,66 @@ from datetime import datetime, timedelta
 # 2019.11.14 make monthly averages
 import pandas as pd
 
-sys.path.append(os.path.abspath(Ldir['LO'] + 'x_tef'))
-import tef_fun
-
 from warnings import filterwarnings
 filterwarnings('ignore') # skip some warning messages
 
-#year = 2017
+def dir_path(string):
+    if not os.path.isdir(string):
+        raise NotADirectoryError(string)
+    return string
 
-# choose input and organize output
-Ldir = Lfun.Lstart()
-indir0 = Ldir['LOo'] + 'tef/'
-# choose the tef extraction to process
-item = Lfun.choose_item(indir0)
+parser = ArgumentParser(description='Plot bulk fluxes as a time series')
+parser.add_argument('--loo', type=dir_path, help='LiveOcean Output dir')
+parser.add_argument('-s', '--section', nargs='*',
+        help='Section(s) to plot, or "all"')
+parser.add_argument('item', nargs='?', help='The TEF fluxes to plot')
+args = parser.parse_args()
+
+if args.loo is None:
+    # choose input and organize output
+    Ldir = Lfun.Lstart()
+    indir0 = Ldir['LOo'] + 'tef/'
+else:
+    indir0 = os.path.join(args.loo, 'tef/')
+if args.item is None:
+    # choose the tef extraction to process
+    item = Lfun.choose_item(indir0)
+else:
+    item = args.item
 
 indir0 = indir0 + item + '/'
 indir = indir0 + 'bulk/'
 sect_list_raw = os.listdir(indir)
 sect_list_raw.sort()
 sect_list = [item for item in sect_list_raw if ('.p' in item)]
-print(20*'=' + ' Processed Sections ' + 20*'=')
-print(*sect_list, sep=", ")
-print(61*'=')
+if args.section is None:
+    print(20*'=' + ' Processed Sections ' + 20*'=')
+    print(*sect_list, sep=", ")
+    print(61*'=')
 # select which sections to process
-my_choice = input('-- Input section to plot (e.g. sog5, or Return to plot all): ')
-if len(my_choice)==0:
+    my_choice = input('-- Input section to plot (e.g. sog5, or Return to plot all): ')
+    if len(my_choice)==0:
+        # full list
+        my_choice = sect_list
+    else: # single item
+        my_choice = [my_choice]
+elif len(args.section) == 1 and args.section[0] == 'all':
     # full list
-    save_fig = True
-else: # single item
-    if (my_choice + '.p') in sect_list:
-        sect_list = [my_choice + '.p']
-        save_fig = False
-    else:
-        print('That section is not available')
-        sys.exit()
+    my_choice = sect_list
+else: # one or more items
+    my_choice = args.section
+if my_choice != sect_list:
+    found_choices = []
+    for c in my_choice:
+        if (c + '.p') in sect_list:
+            found_choices.append(c + '.p')
+        else:
+            raise FileNotFoundError(os.path.join(indir, c + '.p'))
+    sect_list = found_choices
+
 outdir = indir0 + 'bulk_plots/'
 Lfun.make_dir(outdir)
-            
-#plt.close('all')
+save_fig = (len(sect_list) > 1)
 
 sect_list = [item for item in sect_list]
 
