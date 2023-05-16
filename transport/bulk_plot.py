@@ -13,6 +13,7 @@ import pfun
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 from netCDF4 import Dataset
 import pickle
 from datetime import datetime, timedelta
@@ -73,48 +74,18 @@ def process_section(snp):
     ssh = bulk['ssh_lp'] # average SSH across the section, low-passed
     NT, NS = SS.shape
 
-    # make vector and array times in days from start of the year
-    dt = []
-    for tt in ot:
-        dt.append(Lfun.modtime_to_datetime(tt))
-    td = []
-    extract_file = indir0 + '/extractions/' + sn + '.nc'
-    extract_nc = Dataset(extract_file)
-
-    year = int(extract_nc.date_string0.split(".")[0])
-    for tt in dt:
-        #ttt = tt- datetime(dt[0].year,1,1)
-        ttt = tt - datetime(year,1,1) # hardwire for 2016.12.15 start
-        td.append(ttt.days + ttt.seconds/86400)
-    td = np.array(td) # time in days from start of the year
-    Time = td.reshape((NT,1)) * np.ones((1,NS)) # matrix version
+    # make vector and array times in dates
+    td = pd.Timestamp('1/1/1970') + pd.to_timedelta(ot, 's')
+    Time = np.broadcast_to(td.to_numpy(), (NS, NT)).T
 
     dir_str = "Up-Estuary"
-    # some information about direction
-    #x0, x1, y0, y1, landward = sect_df.loc[sn,:]    
-    #if (x0==x1) and (y0!=y1):
-    #    sdir = 'NS'
-    #    if landward == 1:
-    #        dir_str = 'Eastward'
-    #    elif landward == -1:
-    #        dir_str = 'Westward'
-    #    a = [y0, y1]; a.sort()
-    #    y0 = a[0]; y1 = a[1]
-    #elif (x0!=x1) and (y0==y1):
-    #    sdir = 'EW'
-    #    if landward == 1:
-    #        dir_str = 'Northward'
-    #    elif landward == -1:
-    #        dir_str = 'Southward'
-    #    a = [x0, x1]; a.sort()
-    #    x0 = a[0]; x1 = a[1]
-        
+
     # separate out positive and negative transports
     QQp = QQ.copy()
     QQp[QQ<=0] = np.nan
     QQm = QQ.copy()
     QQm[QQ>=0] = np.nan
-    
+
     # form two-layer versions of Q and S
     Qin = np.nansum(QQp, axis=1)
     QSin = np.nansum(QQp*SS, axis=1)
@@ -125,11 +96,8 @@ def process_section(snp):
     # and find net transport to compare with qnet (should be identical)
     Qnet = np.nansum(QQ, axis=1)
     # RESULT: it is identical
-    
-    td_list = []
-    for t in td:
-        td_list.append(datetime(year,1,1,0,0,0) + timedelta(days=t))
-    tef_df = pd.DataFrame(index=td_list, columns=['Qin','Qout','Sin','Sout'])
+
+    tef_df = pd.DataFrame(index=td, columns=['Qin','Qout','Sin','Sout'])
     tef_df.loc[:,'Qin']=Qin
     tef_df.loc[:,'Qout']=Qout
     tef_df.loc[:,'Sin']=Sin
@@ -145,33 +113,32 @@ def process_section(snp):
     # PLOTTING
     # See https://stackoverflow.com/a/65910539/413862 for how num and
     # clear prevent memory leaks
-    fig = plt.figure(num=1 if save_fig else None, figsize=(21,9))
+    fig = plt.figure(num=1 if save_fig else None, figsize=(14,9))
     
     alpha = .5
 
     # Salinity vs. Time (size and color by Transport)
-    ax = fig.add_subplot(2,3,1)
+    ax = fig.add_subplot(2,2,1)
     Qscale = np.nanmean(np.abs(QQ))
     qf = 25
-    ax.scatter(Time, SS, s=qf*np.abs(QQp/Qscale), c='r', alpha=alpha)
-    ax.scatter(Time, SS, s=qf*np.abs(QQm/Qscale), c='b', alpha=alpha)
+    ax.scatter(Time, SS, s=qf*np.abs(QQp/Qscale), c='tab:red', alpha=alpha)
+    ax.scatter(Time, SS, s=qf*np.abs(QQm/Qscale), c='tab:blue', alpha=alpha)
     # add two-layer versions
     if False:
         ax.plot(td, Sin, '-k', td, Sout, '--k')
     else:
-        tef_mean_df.plot(x='yd', y = 'Sin', style='-ok', ax=ax, legend=False)
-        tef_mean_df.plot(x='yd', y = 'Sout', style='--ok', ax=ax, legend=False)
+        tef_mean_df['Sin'].plot(style='-ok', ax=ax, legend=False)
+        tef_mean_df['Sout'].plot(style='--ok', ax=ax, legend=False)
     ax.text(0.05, 0.1, 'Positive is ' + dir_str, transform=ax.transAxes, fontweight='bold')
-    ax.set_xlim(0,366)
     ax.grid(True)
     ax.set_xticklabels([])
     ax.set_ylabel('Salinity')
     # legend
-    ax.scatter(.95, .2, s=qf, c='r', transform=ax.transAxes, alpha=alpha)
-    ax.scatter(.95, .1, s=qf, c='b', transform=ax.transAxes, alpha=alpha)
-    ax.text(.94, .2, 'Positive Q %d (m3/s)' % int(Qscale), color='r', fontweight='bold',
+    ax.scatter(.95, .2, s=qf, c='tab:red', transform=ax.transAxes, alpha=alpha)
+    ax.scatter(.95, .1, s=qf, c='tab:blue', transform=ax.transAxes, alpha=alpha)
+    ax.text(.94, .2, 'Positive Q %d (m3/s)' % int(Qscale), color='tab:red', fontweight='bold',
         horizontalalignment='right', verticalalignment='center', transform=ax.transAxes)
-    ax.text(.94, .1, 'Negative Q %d (m3/s)' % int(Qscale), color='b', fontweight='bold',
+    ax.text(.94, .1, 'Negative Q %d (m3/s)' % int(Qscale), color='tab:blue', fontweight='bold',
         horizontalalignment='right', verticalalignment='center', transform=ax.transAxes)
     ax.set_title(indir0.split('/')[-2])
     
@@ -183,49 +150,41 @@ def process_section(snp):
     # ax.set_xlim(0,366)
     
     # Tranport vs. Time
-    ax = fig.add_subplot(2,3,4)
-    ax.scatter(Time, QQp/1e3, s=qf*np.abs(QQp/Qscale), c='r', alpha=alpha)
-    ax.scatter(Time, -QQm/1e3, s=qf*np.abs(QQm/Qscale), c='b', alpha=alpha)
+    ax = fig.add_subplot(2,2,3)
+    ax.scatter(Time, QQp/1e3, s=qf*np.abs(QQp/Qscale), c='tab:red', alpha=alpha)
+    ax.scatter(Time, -QQm/1e3, s=qf*np.abs(QQm/Qscale), c='tab:blue', alpha=alpha)
     # add two-layer versions
     if False:
         ax.plot(td, Qin/1e3, '-k', td, -Qout/1e3, '--k')
     else:
         this_yd = tef_mean_df.loc[:,'yd'].values
-        this_qin = tef_mean_df.loc[:,'Qin'].values/1e3
-        this_qout = -tef_mean_df.loc[:,'Qout'].values/1e3
-        # tef_mean_df.plot(x='yd', y = 'Qin', style='-ok', ax=ax, legend=False)
-        # tef_mean_df.plot(x='yd', y = 'Qout', style='--ok', ax=ax, legend=False)
-        ax.plot(this_yd, this_qin, '-ok')
-        ax.plot(this_yd, this_qout, '--ok')
-    ax.set_xlim(0,366)
+        this_qin = tef_mean_df.loc[:,'Qin']/1e3
+        this_qout = -tef_mean_df.loc[:,'Qout']/1e3
+        this_qin.plot(style='-ok', ax=ax)
+        this_qout.plot(style='--ok', ax=ax)
     ax.set_ylim(bottom=0)
     ax.grid(True)
-    ax.set_xlabel('Days from 1/1/' + str(year))
     ax.set_ylabel('|Q| 1000 m3/s')
     
     # Tidal energy flux vs. Time as second y-axis
-    ax = fig.add_subplot(3,3,2)
-    ax.plot(td, fnet/1e9, '-g', linewidth=2)
+    ax = fig.add_subplot(3,2,2)
+    ax.plot(td, fnet/1e9, '-', color='tab:green', linewidth=2)
     ax.set_ylabel('Energy Flux (GW)')
     #ax.set_ylim(bottom=0)
-    ax.set_xlim(0,366)
     
     # Surface height
-    ax = fig.add_subplot(3,3,5)
-    ax.plot(td, ssh, '-b', linewidth=2)
-    ax.set_xlim(0,366)
+    ax = fig.add_subplot(3,2,4)
+    ax.plot(td, ssh, '-', color='tab:blue', linewidth=2)
     ax.grid(True)
     ax.set_ylabel('SSH (m)')
-    
+
     # Volume flux
-    ax = fig.add_subplot(3,3,8)
-    ax.plot(td, qnet/1e3, '-c', linewidth=2)
-    ax.plot(td, Qnet/1e3, '--r', linewidth=2)
-    ax.set_xlim(0,366)
+    ax = fig.add_subplot(3,2,6)
+    ax.plot(td, qnet/1e3, '-', color='tab:blue', linewidth=2)
+    ax.plot(td, Qnet/1e3, '--', color='tab:red', linewidth=2)
     ax.grid(True)
-    ax.set_xlabel('Days from 1/1/' + str(year))
     ax.set_ylabel('Qnet 1000 m3/s')
-    
+
     if save_fig:
         plt.savefig(outdir + sn + '.png')
         fig.clear()
