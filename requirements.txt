@@ -10,3 +10,4 @@ sqlalchemy
 psycopg2
 contextily
 adjust_text
+pyxdg

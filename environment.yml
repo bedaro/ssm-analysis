@@ -28,4 +28,5 @@ dependencies:
   - networkx
   - joblib
   - py2dm
+  - pyxdg
 prefix: /home/benr/mambaforge/envs/ssm-analysis
