@@ -508,8 +508,8 @@ def build_salt_budget(model_dates, section_dates, dVSdt, qs_in, qs_out,
     salt_section_data = {}
     sub = '' if qtype is None else qtype + ','
     for x in qs_in.keys():
-        salt_section_data[x + ' $(QS)_\mathrm{' + sub + ',in}$'] = qs_in[x]
-        salt_section_data[x + ' $(QS)_\mathrm{' + sub + ',out}$'] = qs_out[x]
+        salt_section_data[x + ' $(QS)_\mathrm{' + sub + 'in}$'] = qs_in[x]
+        salt_section_data[x + ' $(QS)_\mathrm{' + sub + 'out}$'] = qs_out[x]
     salt_budget = model_salt_df.join(pd.DataFrame(salt_section_data, index=section_dates),
                                      how='left')
 
