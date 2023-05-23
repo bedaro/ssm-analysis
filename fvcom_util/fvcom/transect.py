@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import networkx as nx
+import geopandas as gpd
 from shapely.geometry import LineString
 
 from .grid import FvcomGrid
@@ -170,3 +171,7 @@ class Transect:
         sect_x[1::2], sect_y[1::2] = tuple(self.ele_xys)
         # Create a GeoDataFrame with a LineString geometry
         return LineString([(x, y) for x, y in zip(sect_x, sect_y)])
+
+    def plot(self, **kwargs):
+        gdf = gpd.GeoDataFrame({'geometry': [self.to_geom()]})
+        return gdf.plot(**kwargs)

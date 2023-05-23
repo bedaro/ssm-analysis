@@ -5,7 +5,7 @@ from fvcom.grid import FvcomGrid
 from fvcom.transect import Transect
 import numpy as np
 
-class TestTransect(unittest.TestCase):
+class TestTransectBlock(unittest.TestCase):
     def setUp(self):
         # Construct a 4x4 node grid with unit coordinates
         ncoord = np.zeros((2, 16), int)
@@ -95,5 +95,39 @@ class TestTransect(unittest.TestCase):
         self.assertAlmostEqual(d[0], np.sqrt(5)/6)
         self.assertAlmostEqual(d[1], (np.sqrt(5)+2*np.sqrt(2))/6)
         self.assertAlmostEqual(d[2], (3*np.sqrt(5)+2*np.sqrt(2))/6)
+
+class TestTransectThin(unittest.TestCase):
+    def setUp(self):
+        ncoord = np.array([
+            [1,1], [3,1],
+            [2,2],
+            [1,3], [3,3],
+            [1,5], [3,5],
+            [1,7], [3,7],
+            [2,8],
+            [1,9], [3,9]
+        ]).T
+        nv = np.array([
+            [1,2,3],
+            [1,3,4],
+            [2,3,5],
+            [3,4,5],
+            [4,5,7],
+            [4,6,7],
+            [6,7,9],
+            [6,8,9],
+            [8,9,10],
+            [8,10,11],
+            [9,10,12],
+            [10,11,12]
+        ]).T
+        self.grid = FvcomGrid(ncoord, nv, calc=True)
+
+    def test_thin(self):
+        transect = Transect(self.grid, np.array([5,6]))
+        # Nodes
+        nodes = transect.get_nodes()
+        self.assertEqual(nodes[0], {6, 7})
+        self.assertEqual(nodes[1], {4, 5})
 
 if __name__ == '__main__': unittest.main()

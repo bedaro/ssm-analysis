@@ -207,8 +207,8 @@ def main():
         transects.append(Transect(grid, section_extractions[s]['ele'][:]))
 
     # Define the control volume
-    cv = ControlVolume(transects)
-    cv_node_list = np.array(list(cv.nodes))
+    cv = ControlVolume.from_transects(transects)
+    cv_node_list = np.array(cv.nodes_list)
     logger.info(f'Found {len(cv_node_list)} nodes in control volume')
 
     # Check TEF bulk data

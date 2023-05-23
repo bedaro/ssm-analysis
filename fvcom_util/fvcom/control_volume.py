@@ -1,56 +1,40 @@
 from dataclasses import dataclass, field
 from itertools import groupby
 
+import matplotlib.patheffects as pe
+import geopandas as gpd
+from adjustText import adjust_text
 import networkx as nx
 
+from .grid import FvcomGrid
 from .transect import Transect
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class ControlVolume:
-    transects: list[Transect]
+    grid: FvcomGrid
+    nodes: set
+    calc: bool = False
 
     def __post_init__(self):
+        if self.calc:
+            object.__setattr__(self, "_tces", self._calc_tces())
+
+    @staticmethod
+    def from_transects(transects, calc=False):
         # Check that all transects were made from the same Grid
-        grids = [t.grid for t in self.transects]
+        grids = [t.grid for t in transects]
         g = groupby(grids)
         assert next(g, True) and not next(g, False), "Grids don't match"
-        self._calc_nodes()
 
-    @property
-    def grid(self):
-        """The grid"""
-        return self.transects[0].grid
+        grid = grids[0]
 
-    @property
-    def nodes(self):
-        """The set of all nodes in CV."""
-        return self._nodes
-
-    @property
-    def area(self):
-        """The total CV area."""
-        return self.grid.tces_gdf().loc[list(self._nodes), 'geometry'].area.sum()
-
-    def plot(self, **kwargs):
-        grid_els = self.grid.elements_gdf()
-        args1 = kwargs.copy()
-        args1['color'] = 'gray'
-        if 'ax' in kwargs:
-            grid_els.plot(**args1)
-        else:
-            ax = grid_els.plot(**args1)
-            kwargs['ax'] = ax
-        grid_tces = self.grid.tces_gdf()
-        grid_tces.loc[list(self._nodes)].plot(**kwargs)
-        return ax
-
-    def _calc_nodes(self):
-        border_nodes = [t.get_nodes() for t in self.transects]
-        # Get the grid's node adjacency, then remove all connections between
-        # upstream and downstream nodes on all transects. If caclulations were
-        # done correctly, this will break up the graph into separate
-        # components, one of which will be our control volume
-        adj_dict = self.grid.node_neis()
+        border_nodes = [t.get_nodes() for t in transects]
+        # Get the grid's node adjacency, then remove all connections
+        # between upstream and downstream nodes on all transects. If
+        # caclulations were done correctly, this will break up the graph
+        # into separate components, one of which will be our control
+        # volume
+        adj_dict = grid.node_neis()
         for (upstream_nodes, downstream_nodes) in border_nodes:
             for un in upstream_nodes:
                 adj_dict[un] -= downstream_nodes
@@ -59,9 +43,9 @@ class ControlVolume:
 
         g = nx.Graph(adj_dict)
 
-        # Use the Graph to find which component is our control volume, based
-        # on all sections having nodes within in
-        if len(self.transects) == 1:
+        # Use the Graph to find which component is our control volume,
+        # based on all sections having nodes within in
+        if len(transects) == 1:
             # Just pick an upstream node
             node = list(upstream_nodes)[0]
         else:
@@ -80,8 +64,77 @@ class ControlVolume:
                     break
             else:
                 node = candidates[0]
-        object.__setattr__(self, "_nodes",
-                nx.node_connected_component(g, node))
+        nodes = nx.node_connected_component(g, node)
+
+        return TransectControlVolume(grid=grid, nodes=nodes,
+                transects=transects, calc=calc)
+
+    @property
+    def nodes_list(self):
+        """The nodes as a list"""
+        nlist = list(self.nodes)
+        nlist.sort()
+        return nlist
+
+    @property
+    def tces(self):
+        if self.calc:
+            return self._tces.copy()
+        else:
+            return self._calc_tces()
+
+    def _calc_tces(self):
+        return self.grid.tces_gdf().loc[self.nodes_list]
+
+    @property
+    def area(self):
+        """The total CV area."""
+        return self.tces['geometry'].area.sum()
+
+    def plot(self, data=None, label=None, base='union',
+            callback=None, **kwargs):
+        cv_tces = self.tces
+        if data is not None:
+            cv_tces['data'] = data
+            col = 'data'
+            if 'legend' not in kwargs:
+                kwargs['legend'] = True
+        else:
+            col = None
+        ax = cv_tces.plot(col, zorder=2, **kwargs)
+        xmin, xmax, ymin, ymax = ax.axis()
+        if base == 'elements':
+            grid_base = self.grid.elements_gdf()
+            grid_base.plot(ax=ax, facecolor='#ccc', edgecolors='#aaa', zorder=1)
+        elif base == 'union':
+            grid_els = self.grid.elements_gdf()
+            grid_base = gpd.GeoDataFrame({'geometry': [grid_els['geometry'].unary_union]}, crs=grid_els.crs)
+            grid_base.plot(ax=ax, facecolor='#ccc', edgecolors='k',
+                    zorder=1)
+
+        if callback is not None:
+            callback(self, ax)
+
+        if label is not None:
+            pt = cv_tces['geometry'].unary_union.representative_point()
+            ax.annotate(label, (pt.x, pt.y), ha='center', va='center',
+                    path_effects=[pe.withStroke(linewidth=3,
+                        foreground='white', alpha=0.6)]
+            )
+        ax.set(ybound=(ymin, ymax), xbound=(xmin, xmax))
+        return ax
+
+    def __sub__(self, ns: set):
+        return ControlVolume(grid=self.grid, nodes=self.nodes - ns,
+                calc=self.calc)
+
+    def __add__(self, ns: set):
+        return ControlVolume(grid=self.grid, nodes=self.nodes + ns,
+                calc=self.calc)
+
+@dataclass(frozen=True, kw_only=True)
+class TransectControlVolume(ControlVolume):
+    transects: list[Transect]
 
     def transect_directions(self):
         """List of bools; True if upstream from transect is in CV"""
@@ -89,5 +142,42 @@ class ControlVolume:
         directions = []
         for t in self.transects:
             up, down = t.get_nodes()
-            directions.append(next(iter(up)) in self._nodes)
+            directions.append(next(iter(up)) in self.nodes)
         return directions
+
+    def __sub__(self, ns: set):
+        return TransectControlVolume(grid=self.grid,
+                nodes=self.nodes - ns, transects=self.transects,
+                calc=self.calc)
+
+    def __add__(self, ns: set):
+        return TransectControlVolume(grid=self.grid,
+                nodes=self.nodes + ns, transects=self.transects,
+                calc=self.calc)
+
+    def plot(self, transect_labels=None, callback=None, **kwargs):
+        if transect_labels is not None:
+            texts = []
+            avoid_x = []
+            avoid_y = []
+            def on_plot(self, ax):
+                for t,label in zip(self.transects, transect_labels):
+                    ls = t.to_geom()
+                    gs = gpd.GeoSeries(ls)
+                    gs.plot(ax=ax, color='k', zorder=3)
+                    texts.append(ax.annotate(label,
+                        xy=(ls.centroid.x, ls.centroid.y), ha='center',
+                        va='center', zorder=4,
+                        path_effects=[pe.withStroke(linewidth=3,
+                            foreground='white', alpha=0.6)]
+                    ))
+                    avoid_x.extend(ls.coords.xy[0])
+                    avoid_y.extend(ls.coords.xy[1])
+                if callback is not None:
+                    callback(self, ax)
+            cb = on_plot
+        else:
+            cb = callback
+        ax = super().plot(callback=cb, **kwargs)
+        if transect_labels is not None:
+            adjust_text(texts, avoid_x, avoid_y)

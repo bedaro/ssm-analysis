@@ -41,7 +41,7 @@ class FvcomGrid:
             dataset['h'][:]]), dataset['nv'][:].astype(int), calc=calc)
 
     @staticmethod
-    def from_gridfile(gridfile, calc=True):
+    def from_gridfile(gridfile, depfile=None, calc=True):
         """Read the grid defined in a FVCOM grid input file
 
         Based on subroutine GETDIM (getdim.F) from FVCOM 2.7"""
@@ -54,11 +54,13 @@ class FvcomGrid:
         # (causing the following value to be smaller)
         n = j[np.nonzero(j[:-1] > j[1:])[0][0]]
         # Lookup arrays for vertex nodes 1, 2, and 3 of each element
-        # Fortran uses 1-based indexing so we have to subtract 1 to get the NumPy
-        # array indices
-        nv = np.array([nvtmp1[:n], nvtmp2[:n], nvtmp3[:n]]) - 1 
+        nv = np.array([nvtmp1[:n], nvtmp2[:n], nvtmp3[:n]])
         # Node coordinate array
-        ncoord = np.array([nvtmp1[n:], nvtmp2[n:]])
+        xy = [nvtmp1[n:], nvtmp2[n:]]
+        if depfile is not None:
+            nodex, nodey, nodez = np.loadtxt(depfile, unpack=True)
+            xy.append(nodez)
+        ncoord = np.array(xy)
 
         return FvcomGrid(ncoord, nv, calc=calc)
 
@@ -240,3 +242,10 @@ class FvcomGrid:
         for i,els in enumerate(self.nbe.T,1):
             ele_adj_dict[i] = els[els > 0]
         return ele_adj_dict
+
+    def to_mesh(self, meshfile):
+        with py2dm.Writer(meshfile) as mesh:
+            for i,node in enumerate(self.ncoord.T):
+                mesh.node(i+1, *node)
+            for i,el in enumerate(self.nv.T):
+                mesh.element('E3T', i+1, *el)

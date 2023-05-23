@@ -7,34 +7,22 @@ import shutil
 import logging
 from enum import Flag, auto
 from argparse import ArgumentParser, Namespace, FileType
+from configparser import ConfigParser
+
 from netCDF4 import Dataset, MFDataset
 import geopandas as gpd
 import numpy as np
+
+from fvcom.grid import FvcomGrid
+from fvcom.transect import Transect
+from fvcom.control_volume import ControlVolume
 
 domain_nodes_shp = "gis/ssm domain nodes.shp"
 masked_nodes_txt = "gis/masked nodes.txt"
 
 logger = logging.getLogger(__name__)
 
-def get_node_ids(shps, masked):
-    merged = None
-    for i,shp in enumerate(shps):
-        df = gpd.read_file(shp)
-        df.set_index('node_id', inplace=True)
-        logger.debug("Shapefile {0} has {1} nodes".format(shp, len(df)))
-        if merged is None:
-            merged = df.index
-        else:
-            merged = merged.union(df.index)
-    logger.debug("get_node_ids found {0} nodes in {1} shapefiles".format(
-        len(merged), len(shps)))
-
-    masked_nodes = np.loadtxt(masked).astype(np.int64)
-    merged = merged.difference(masked_nodes)
-    logger.info("Found {0} nodes to extract after masking".format(len(merged)))
-
-    return merged.to_numpy()
-
+# FIXME replace with DepthCoordinate calls
 DEFAULT_SIGLAYERS = [-0.01581139, -0.06053274, -0.12687974, -0.20864949,
                   -0.30326778, -0.40915567, -0.52520996, -0.65060186,
                   -0.78467834, -0.9269075 ]
@@ -149,8 +137,12 @@ def main():
             help="the output CDF file (created if it doesn't exist)")
     parser.add_argument("outprefix",
             help="a prefix for the extracted variables in the output CDF")
-    parser.add_argument("-d", dest="domain_node_shapefiles", action="append",
+    parser.add_argument("-d", dest="domain_node_shapefiles", nargs='*',
             help="Specify a domain node shapefile")
+    parser.add_argument('--sections', '-s', nargs='*',
+            help='Specify sections bounding a control volume for the domain')
+    parser.add_argument('--sections-config', type=FileType('r'),
+            help='Specify a section config file')
     parser.add_argument("-m", dest="masked_nodes_file", type=FileType('r'),
             help="Specify a different masked nodes text file")
     parser.add_argument("--invar", dest="input_vars", type=colon_meta,
@@ -167,16 +159,17 @@ def main():
     # Cannot include default values of lists here, see
     # https://bugs.python.org/issue16399
     parser.set_defaults(chunk_size=4, verbose=False,
-            masked_nodes_file=os.path.join(script_home, masked_nodes_txt))
+            masked_nodes_file=os.path.join(script_home, masked_nodes_txt),
+            sections_config=os.path.join(script_home, 'SSM_Grid', 'sections.ini'))
     args = parser.parse_args()
     # This is the workaround
     if not args.input_vars:
         args.input_vars = [("DOXG",InputAttr.BOTTOM)]
-    if not args.domain_node_shapefiles:
+    if not args.domain_node_shapefiles and not args.sections:
         args.domain_node_shapefiles = [os.path.join(script_home, domain_nodes_shp)]
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
-    #logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
 
     if args.cache:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -201,9 +194,35 @@ def main():
 def do_extract(exist_cdfs, output_cdf, **kwargs):
     args = Namespace(**kwargs)
     indata = MFDataset(exist_cdfs) if len(exist_cdfs) > 1 else Dataset(exist_cdfs[0])
+    grid = FvcomGrid.from_output(indata)
     if not os.path.exists(output_cdf):
         logger.info("Determining scope of work...")
-        node_ids = get_node_ids(args.domain_node_shapefiles, args.masked_nodes_file)
+        if args.domain_node_shapefiles:
+            cv = None
+            for shp in args.domain_node_shapefiles:
+                df = gpd.read_file(shp).set_index('node_id')
+                nodes = set(df.index)
+                if cv is None:
+                    cv = ControlVolume(grid=grid, nodes=nodes)
+                else:
+                    cv = cv + nodes
+            logger.debug("get_node_ids found {0} nodes in {1} shapefiles".format(
+                len(cv.nodes), len(args.domain_node_shapefiles)))
+        else:
+            allsections = ConfigParser()
+            allsections.read_file(args.sections_config)
+            transects = []
+            for sect in args.sections:
+                waypoints = np.array(allsections[sect]['waypoints'].split(' ')).astype(int)
+                tr = Transect.shortest(grid, waypoints)
+                transects.append(tr)
+            cv = ControlVolume.from_transects(transects)
+            logger.debug(f"control volume defined by {len(transects)} transects has {len(cv.nodes)} nodes")
+        masked_nodes = np.loadtxt(args.masked_nodes_file).astype(np.int64)
+        cv = cv - set(masked_nodes)
+        logger.debug(f"{len(cv.nodes)} remain after masking")
+        node_ids = np.array(cv.nodes_list)
+
         logger.info("Initializing output file...")
         outdata = init_output(output_cdf, indata, node_ids, **vars(args))
         outdata['time'][:] = indata['time'][:] / 3600 / 24
@@ -254,6 +273,7 @@ def get_photic_mask(cdfin, node_ids):
     return mask
 
 def copy_data(cdfin, cdfout, timeidx, node_ids, **kwargs):
+    # FIXME replace with a DepthCoordinate
     if 'siglev' in cdfin.variables:
         cdfin['siglev'].set_auto_mask(False)
         siglayers = cdfin['siglev'][:-1] - cdfin['siglev'][1:]
