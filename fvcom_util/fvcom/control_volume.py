@@ -9,6 +9,8 @@ import networkx as nx
 from .grid import FvcomGrid
 from .transect import Transect
 
+text_outline = pe.withStroke(linewidth=3, foreground='white', alpha=0.6)
+
 @dataclass(frozen=True, kw_only=True)
 class ControlVolume:
     grid: FvcomGrid
@@ -92,7 +94,7 @@ class ControlVolume:
         return self.tces['geometry'].area.sum()
 
     def plot(self, data=None, label=None, base='union',
-            callback=None, **kwargs):
+            helpers=[], **kwargs):
         cv_tces = self.tces
         if data is not None:
             cv_tces['data'] = data
@@ -112,16 +114,28 @@ class ControlVolume:
             grid_base.plot(ax=ax, facecolor='#ccc', edgecolors='k',
                     zorder=1)
 
-        if callback is not None:
-            callback(self, ax)
+        for h in helpers:
+            h.reset()
+            h.set_cv(self)
+            h(ax)
 
+        texts = []
+        avoid_x = []
+        avoid_y = []
         if label is not None:
             pt = cv_tces['geometry'].unary_union.representative_point()
             ax.annotate(label, (pt.x, pt.y), ha='center', va='center',
-                    path_effects=[pe.withStroke(linewidth=3,
-                        foreground='white', alpha=0.6)]
+                    path_effects=[text_outline]
             )
+            avoid_x.append(pt.x)
+            avoid_y.append(pt.y)
         ax.set(ybound=(ymin, ymax), xbound=(xmin, xmax))
+        for h in helpers:
+            texts.extend(h.texts)
+            avoid_x.extend(h.avoid_x)
+            avoid_y.extend(h.avoid_y)
+        if len(texts):
+            adjust_text(texts, avoid_x, avoid_y)
         return ax
 
     def __sub__(self, ns: set):
@@ -155,29 +169,66 @@ class TransectControlVolume(ControlVolume):
                 nodes=self.nodes + ns, transects=self.transects,
                 calc=self.calc)
 
-    def plot(self, transect_labels=None, callback=None, **kwargs):
+    def plot(self, transect_labels=None, helpers=[], **kwargs):
         if transect_labels is not None:
-            texts = []
-            avoid_x = []
-            avoid_y = []
-            def on_plot(self, ax):
-                for t,label in zip(self.transects, transect_labels):
-                    ls = t.to_geom()
-                    gs = gpd.GeoSeries(ls)
-                    gs.plot(ax=ax, color='k', zorder=3)
-                    texts.append(ax.annotate(label,
-                        xy=(ls.centroid.x, ls.centroid.y), ha='center',
-                        va='center', zorder=4,
-                        path_effects=[pe.withStroke(linewidth=3,
-                            foreground='white', alpha=0.6)]
-                    ))
-                    avoid_x.extend(ls.coords.xy[0])
-                    avoid_y.extend(ls.coords.xy[1])
-                if callback is not None:
-                    callback(self, ax)
-            cb = on_plot
-        else:
-            cb = callback
-        ax = super().plot(callback=cb, **kwargs)
-        if transect_labels is not None:
-            adjust_text(texts, avoid_x, avoid_y)
+            helpers.append(TransectHelper(self.cv.transects, transect_labels))
+        ax = super().plot(helpers=helpers, **kwargs)
+
+class PlotHelper:
+    cv = None
+    avoid_x = []
+    avoid_y = []
+    texts = []
+
+    def set_cv(self, cv):
+        self.cv = cv
+
+    def reset(self):
+        self.avoid_x = []
+        self.avoid_y = []
+        self.texts = []
+
+    def __call__(self, ax):
+        """Perform any additional plotting before axis bounds are adjusted"""
+        raise NotImplementedError("Subclass must override")
+
+class TransectHelper(PlotHelper):
+    def __init__(self, transects, transect_labels):
+        self.transects = transects
+        self.transect_labels = transect_labels
+
+    def __call__(self, ax):
+        for t,label in zip(self.transects, self.transect_labels):
+            ls = t.to_geom()
+            gs = gpd.GeoSeries(ls)
+            gs.plot(ax=ax, color='k', zorder=3)
+            self.texts.append(ax.annotate(label,
+                xy=(ls.centroid.x, ls.centroid.y), ha='center',
+                va='center', zorder=4,
+                path_effects=[text_outline]
+            ))
+            self.avoid_x.extend(ls.coords.xy[0])
+            self.avoid_y.extend(ls.coords.xy[1])
+
+class StationHelper(PlotHelper):
+    sites_df = None
+
+    def __init__(self, sites: dict):
+        self.sites = sites
+
+    def __call__(self, ax):
+        if self.sites_df is None:
+            self.sites_df = self.cv.grid.nodes_gdf().loc[
+                    self.sites.keys()].copy()
+            self.sites_df['name'] = ''
+            for n,s in self.sites.items():
+                self.sites_df.loc[n, 'name'] = s
+        self.sites_df.plot(ax=ax, color='k', marker='^', alpha=0.6, zorder=3)
+        for n,row in self.sites_df.iterrows():
+            self.texts.append(ax.annotate(row['name'],
+                xy=(row['geometry'].x, row['geometry'].y), ha='center',
+                va='center', zorder=4, fontstyle='italic',
+                path_effects=[text_outline]
+            ))
+            self.avoid_x.append(row['geometry'].x)
+            self.avoid_y.append(row['geometry'].y)
