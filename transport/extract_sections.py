@@ -51,6 +51,11 @@ def chunks(lst, n):
 
 MAX_JOBS = min(len(os.sched_getaffinity(0)), psutil.cpu_count(logical=False))
 
+def dir_path(string):
+    if not os.path.isdir(string):
+        raise NotADirectoryError(string)
+    return string
+
 def main():
     global MAX_JOBS
     parser = ArgumentParser(description="Extract sections of transport and tracer values.")
@@ -80,6 +85,8 @@ def main():
             help="Print progress messages during the extraction")
     parser.add_argument("-s", "--statevars", nargs="*",
             help="Extract additional state variables by name(s)")
+    parser.add_argument("--loo", type=dir_path, default="LiveOcean_output",
+            help="LiveOcean Output dir")
     # TODO implement caching option for performance on Klone
 
     parser.set_defaults(chunk_size=4, date_string0='none', date_string1='none', ex_name='untitled',
@@ -91,23 +98,23 @@ def main():
     config = ConfigParser()
     config.read(args.sectionsfile)
 
-    root = EXTRACTION_ROOT_DIR.format(outdir=args.outdir)
+    root = EXTRACTION_ROOT_DIR.format(loo=args.loo, outdir=args.outdir)
     if not os.path.isdir(root):
-        os.mkdir(root)
+        os.makedirs(root)
 
     if args.max_jobs is not None:
         MAX_JOBS = args.max_jobs
 
-    do_extract(args.incdf, config, args.outdir, **vars(args))
+    do_extract(args.incdf, config, root, **vars(args))
 
 def sect_linestr(name, sect):
     """Build a LineString object from the X and Y values in sect"""
     return [name, LineString([xy for xy in tuple(sect['transect'].ele_xys.T)])]
 
-EXTRACTION_ROOT_DIR = 'LiveOcean_output/tef/{outdir}'
-EXTRACTION_OUT_PATH = EXTRACTION_ROOT_DIR + '/extractions/{name}.nc'
-PLOT_ROOT_DIR = EXTRACTION_ROOT_DIR + '/physical_section_plots'
-PLOT_PATH = PLOT_ROOT_DIR + '/{name}/{plot}.png'
+EXTRACTION_ROOT_DIR = '{loo}/tef/{outdir}'
+EXTRACTION_OUT_PATH = 'extractions/{name}.nc'
+PLOT_ROOT_DIR = 'physical_section_plots'
+PLOT_PATH = '{name}/{plot}.png'
 
 def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
     logger = root_logger.getChild('do_extract')
@@ -184,7 +191,7 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
 
     for name,section in sections.items():
         meta['section_name'] = name
-        out_fn = EXTRACTION_OUT_PATH.format(outdir=output_dir, name=name)
+        out_fn = os.path.join(output_dir, EXTRACTION_OUT_PATH.format(name=name))
         out_dir = os.path.dirname(out_fn)
         if not os.path.isdir(out_dir):
             os.mkdir(out_dir)
@@ -256,7 +263,7 @@ def copy_data(name, section, infiles, time_range, per_hr, output_dir,
             (indata['time'][:] == times_in[-1]).nonzero()[0][0]+1,
             per_hr)
 
-    out_fn = EXTRACTION_OUT_PATH.format(outdir=output_dir, name=name)
+    out_fn = os.path.join(output_dir, EXTRACTION_OUT_PATH.format(name=name))
     outds = Dataset(out_fn, 'a')
 
     tout_slc = slice(
@@ -568,7 +575,7 @@ def plot_locations(ax, grid, sections_gdf, transects):
 def make_plots(indata, transects, outdir):
     """Make model grid and profile plots"""
 
-    dir_name = PLOT_ROOT_DIR.format(outdir=outdir)
+    dir_name = os.path.join(outdir, PLOT_ROOT_DIR)
     if not os.path.isdir(dir_name):
         os.mkdir(dir_name)
 
@@ -592,7 +599,7 @@ def make_plots(indata, transects, outdir):
         fig, ax = plt.subplots(figsize=(6,8))
         plot_locations(ax, grid, sections_gdf, transects)
         ax.set_title("All Sections")
-        fig.savefig(dir_name + '/all_sections_map.png')
+        fig.savefig(os.path.join(dir_name, 'all_sections_map.png'))
         plt.close(fig)
 
 class SectionLocator(ticker.AutoLocator):
@@ -643,7 +650,7 @@ def make_section_plot(name, transect, outdir, depthcoord):
             crs='epsg:32610')
 
     # Open the extraction file
-    ds = Dataset(EXTRACTION_OUT_PATH.format(outdir=outdir, name=name))
+    ds = Dataset(os.path.join(outdir, EXTRACTION_OUT_PATH.format(name=name)))
     z0 = ds['z0'][:]
     da0 = ds['DA0'][:]
     # get time axis for indexing
@@ -665,7 +672,7 @@ def make_section_plot(name, transect, outdir, depthcoord):
             'ubound': m + 2 * std
         })
 
-    dir_name = os.path.dirname(PLOT_PATH.format(outdir=outdir, name=name, plot=''))
+    dir_name = os.path.dirname(os.path.join(outdir, PLOT_ROOT_DIR, PLOT_PATH.format(name=name, plot='')))
     if not os.path.isdir(dir_name):
         os.mkdir(dir_name)
 
@@ -745,8 +752,8 @@ def make_section_plot(name, transect, outdir, depthcoord):
                         fontsize='large', fontweight='bold')
         nnnn = ('0000' + str(mm))[-4:]
         plotname = 'plot_' + nnnn
-        fig.savefig(PLOT_PATH.format(outdir=outdir, name=name,
-            plot=plotname))
+        fig.savefig(os.path.join(outdir, PLOT_ROOT_DIR, PLOT_PATH.format(name=name,
+            plot=plotname)))
 
     ds.close()
     return name, gdf
