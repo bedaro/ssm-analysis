@@ -172,7 +172,7 @@ class TransectControlVolume(ControlVolume):
     def plot(self, transect_labels=None, helpers=[], **kwargs):
         if transect_labels is not None:
             helpers.append(TransectHelper(self.cv.transects, transect_labels))
-        ax = super().plot(helpers=helpers, **kwargs)
+        return super().plot(helpers=helpers, **kwargs)
 
 class PlotHelper:
     cv = None
