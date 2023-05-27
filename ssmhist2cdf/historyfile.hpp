@@ -26,7 +26,7 @@
 
 class HistoryFile {
   public:
-    HistoryFile();
+    HistoryFile() noexcept;
     HistoryFile(std::string file_path);
     HistoryFile(std::string file_path, size_t state_vars);
     float read_time(size_t t);
@@ -34,9 +34,10 @@ class HistoryFile {
 
     void set_file(std::string file_path);
     void set_file(std::string file_path, size_t state_vars);
-    size_t get_statevars();
-    size_t get_nodes();
-    size_t get_times();
+    std::string get_path() const noexcept;
+    size_t get_statevars() const noexcept;
+    size_t get_nodes() const noexcept;
+    size_t get_times() const noexcept;
 
   private:
     std::string path;
@@ -49,7 +50,7 @@ class HistoryFile {
      * Parse one state variable from the given iterators using Spirit.
      */
     template <typename It> bool parse_statevar(It& pos, It last,
-        std::vector<float>& data);
+        std::vector<float>& data) const noexcept;
 
     /*
      * Parse the "header" lines in the file, validate the version, and
@@ -60,6 +61,30 @@ class HistoryFile {
 
     void getProperties();
 
+};
+
+class HistoryFileException : public std::exception {
+  protected:
+    const HistoryFile* history_file;
+    std::string error_message;
+    int error_offset;
+  public:
+    explicit HistoryFileException(const HistoryFile* hf, const std::string& msg):
+      history_file(hf),
+      error_message(msg),
+      error_offset(-1)
+      {}
+
+    explicit HistoryFileException(const HistoryFile* hf, const std::string& msg,
+        int err_off):
+      history_file(hf),
+      error_message(msg),
+      error_offset(err_off)
+      {}
+
+    virtual const char *what() const noexcept { return error_message.c_str(); }
+    virtual const HistoryFile* getHistoryFile() const noexcept { return history_file; }
+    virtual int getErrorOffset() const noexcept { return error_offset; }
 };
 
 #endif

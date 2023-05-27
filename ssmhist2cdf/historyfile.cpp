@@ -9,7 +9,7 @@
 #include <boost/spirit/include/support_line_pos_iterator.hpp>
 
 template <typename It>
-bool HistoryFile::parse_statevar(It& pos, It last, std::vector<float>& data) {
+bool HistoryFile::parse_statevar(It& pos, It last, std::vector<float>& data) const noexcept {
   namespace qi = boost::spirit::qi;
   namespace phoenix = boost::phoenix;
   using phoenix::ref;
@@ -32,12 +32,15 @@ size_t HistoryFile::read_header(float& hdr_time, size_t& hdr_node_ct) {
   std::istringstream s(line);
   s >> hdr_time >> ver >> hdr_node_ct;
   if(ver != HISTORY_FILE_VER) {
-    throw "Parse failed: version mismatch (" + std::to_string(ver) + ") in header";
+    throw HistoryFileException(this,
+        "Parse failed: version mismatch (" + std::to_string(ver) + ") in header",
+        stream.tellg()
+    );
   }
   // Include the newline in the total header size
   return line.length() + 1;
 }
-HistoryFile::HistoryFile() {
+HistoryFile::HistoryFile() noexcept {
   stream.exceptions(std::ifstream::failbit|std::ifstream::badbit);
 }
 
@@ -50,7 +53,7 @@ HistoryFile::HistoryFile(const std::string file_path,
   set_file(file_path, state_vars);
 }
 
-void HistoryFile::set_file(std::string file_path) {
+void HistoryFile::set_file(const std::string file_path) {
   path = file_path;
   if(stream.is_open()) {
     stream.close();
@@ -60,7 +63,7 @@ void HistoryFile::set_file(std::string file_path) {
   getProperties();
 }
 
-void HistoryFile::set_file(std::string file_path, const size_t state_vars) {
+void HistoryFile::set_file(const std::string file_path, const size_t state_vars) {
   path = file_path;
   if(stream.is_open()) {
     stream.close();
@@ -70,9 +73,10 @@ void HistoryFile::set_file(std::string file_path, const size_t state_vars) {
   getProperties();
 }
 
-size_t HistoryFile::get_statevars() { return statevars; }
-size_t HistoryFile::get_nodes() { return nodes; }
-size_t HistoryFile::get_times() { return times; }
+std::string HistoryFile::get_path() const noexcept { return path; }
+size_t HistoryFile::get_statevars() const noexcept { return statevars; }
+size_t HistoryFile::get_nodes() const noexcept { return nodes; }
+size_t HistoryFile::get_times() const noexcept { return times; }
 
 void HistoryFile::getProperties() {
   using std::filesystem::file_size;
@@ -111,7 +115,10 @@ void HistoryFile::getProperties() {
   // Check the input file size to infer how many times there are
   size_t sz = file_size(path);
   if(sz % bytes_per_time != 0) {
-    throw "File is malformed, size is not a multiple of time blocks";
+    std::cerr << "Warning: " << path << " is malformed" << std::endl;
+    std::cerr << "File size (" << std::to_string(sz) <<
+      ") is not a multiple of time blocks (" <<
+      std::to_string(bytes_per_time) << ")" << std::endl;
   }
   times = sz / bytes_per_time;
 }
@@ -147,11 +154,14 @@ std::vector<float> HistoryFile::read_statevar(size_t t, size_t i) {
     end(read_buffer + bytes_per_statevar);
   std::vector<float> data;
   if(! parse_statevar(begin, end, data)) {
-    throw "Parse failed!";
+    throw HistoryFileException(this, "Parse failed!", stream.tellg());
   }
   if(data.size() != nodes) {
-    throw "Parse did not complete (" + std::to_string(data.size()) +
-      " < " + std::to_string(nodes) + " nodes)";
+    throw HistoryFileException(this,
+        "Parse did not complete (" + std::to_string(data.size()) +
+        " < " + std::to_string(nodes) + " nodes)",
+        stream.tellg()
+    );
   }
   return data;
 }

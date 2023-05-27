@@ -78,7 +78,7 @@ int main(int argc, char *argv[]) {
   float time = 0;
 #ifndef PARALLEL
   rank = 0;
-  const int procs = 1;
+  const size_t procs = 1;
 #else
   MPI::Init(argc, argv);
   MPI::Comm& mpiComm = MPI::COMM_WORLD;
@@ -103,6 +103,7 @@ int main(int argc, char *argv[]) {
   p.add("output-file", 1).add("input-file", -1);
 
   po::variables_map vm;
+  HistoryFile hf;
   try {
     po::store(po::command_line_parser(argc, argv).
               options(desc).positional(p).run(), vm);
@@ -140,13 +141,7 @@ int main(int argc, char *argv[]) {
   int input_w = std::ceil(std::log10(input_files.size() + 1));
 
   try {
-#ifndef PARALLEL
-    netCDF::NcFile ncFile(output_file, netCDF::NcFile::newFile);
-    if(vm.count("hyd-model")) {
-      netCDF::NcFile ncHyd(vm["hyd-model"].as<std::string>(), netCDF::NcFile::read);
-      copyFromHyd(ncHyd, ncFile);
-    }
-#else
+#ifdef PARALLEL
     verbose &= (rank == 0);
     if(verbose) {
       std::cout << "Running in parallel, " << procs << " processes" << std::endl;
@@ -154,45 +149,73 @@ int main(int argc, char *argv[]) {
 
     mpiComm.Set_errhandler(MPI::ERRORS_THROW_EXCEPTIONS);
     MPI::Info mpiInfo = MPI::INFO_NULL;
-
-    netCDF::NcFile::FileMode fMode;
-    if(vm.count("hyd-model")) {
-      // Copy the FVCOM data only in the top-rank process, before opening the
-      // output file in parallel. This requires changing the open mode
-      if(rank == 0) {
-        netCDF::NcFile ncHyd(vm["hyd-model"].as<std::string>(), netCDF::NcFile::read);
-        netCDF::NcFile f(output_file, netCDF::NcFile::newFile);
-        copyFromHyd(ncHyd, f);
-        f.close();
-      }
-      // Make sure all other processes wait
-      mpiComm.Barrier();
-      fMode = netCDF::NcFile::write;
-    } else {
-      fMode = netCDF::NcFile::newFile;
-    }
-    netCDF::ParNcFile ncFile(mpiComm, mpiInfo, output_file, fMode);
 #endif
-
-    unsigned long nodes, times;
-    netCDF::NcDim timeDim, sigmaDim, cellDim;
-
+    unsigned long nodes = 0, times = 0;
     // Only do this once to ensure processes can't be out of sync due
     // to I/O based race conditions
     if(rank == 0) {
       // Read the first header line of the first file to get node and time
       // count
-      HistoryFile hf = HistoryFile(input_files[0]);
-      nodes = hf.get_nodes();
-      times = hf.get_times();
+      try {
+        hf.set_file(input_files[0]);
+        nodes = hf.get_nodes();
+        times = hf.get_times();
+      } catch(HistoryFileException& e) {
+        std::cerr << "Error in file " << e.getHistoryFile()->get_path() << std::endl;
+        std::cerr << e.what() << std::endl;
+      }
     }
 #ifdef PARALLEL
     // Distribute the history file properties to the other processes
     mpiComm.Bcast(&nodes, 1, MPI::UNSIGNED_LONG, 0);
     mpiComm.Bcast(&times, 1, MPI::UNSIGNED_LONG, 0);
 #endif
+    // Check if earlier file read succeeded
+    if(nodes == 0) {
+      abort(1);
+    }
 
     int t_w = std::ceil(std::log10(times + 1));
+
+#ifdef PARALLEL
+    netCDF::NcFile::FileMode fMode = netCDF::NcFile::newFile;
+#else
+    netCDF::NcFile ncFile(output_file, netCDF::NcFile::newFile);
+#endif
+    if(vm.count("hyd-model")) {
+      // Copy the FVCOM data only in the top-rank process, before opening the
+      // output file in parallel. This requires changing the open mode
+      if(rank == 0) {
+        if(verbose) {
+          std::cout << "Copying data from hydro model " << vm["hyd-model"].as<std::string>() << std::endl;
+        }
+        netCDF::NcFile ncHyd(vm["hyd-model"].as<std::string>(), netCDF::NcFile::read);
+#ifdef PARALLEL
+        netCDF::NcFile f(output_file, netCDF::NcFile::newFile);
+        copyFromHyd(ncHyd, f);
+        f.close();
+#else
+        copyFromHyd(ncHyd, ncFile);
+#endif
+        if(verbose) {
+          std::cout << "Data copy complete." << std::endl;
+        }
+      }
+
+#ifdef PARALLEL
+      // Make sure all other processes wait
+      mpiComm.Barrier();
+      fMode = netCDF::NcFile::write;
+#endif
+    }
+#ifdef PARALLEL
+    netCDF::ParNcFile ncFile(mpiComm, mpiInfo, output_file, fMode);
+#endif
+    if(verbose) {
+      std::cout << "Opened output file " << output_file << std::endl;
+    }
+
+    netCDF::NcDim timeDim, sigmaDim, cellDim;
 
     // Initialize the netCDF file (or at least fetch dimensions)
     timeDim = ncFile.addDim("time", times);
@@ -213,7 +236,6 @@ int main(int argc, char *argv[]) {
     // the last file so we may have to keep checking for them
     std::map<size_t, size_t> vars_found;
 
-    HistoryFile hf;
     Timer timer;
 
     for(size_t i = 0; i < input_files.size(); ++i) {
@@ -323,8 +345,9 @@ int main(int argc, char *argv[]) {
             << " failed at time " << time << std::endl;
         std::cerr << e.what() << std::endl;
         abort(1);
-      } catch(char const *msg) {
-        std::cerr << msg << std::endl;
+      } catch(HistoryFileException& e) {
+        std::cerr << "Error in file " << e.getHistoryFile()->get_path() << std::endl;
+        std::cerr << e.what() << std::endl;
         abort(1);
       }
     }
@@ -338,8 +361,9 @@ int main(int argc, char *argv[]) {
   } catch(netCDF::exceptions::NcException& e) {
     std::cerr << e.what() << std::endl;
     abort(1);
-  } catch(char const *msg) {
-    std::cerr << msg << std::endl;
+  } catch(HistoryFileException& e) {
+    std::cerr << "Error in file " << e.getHistoryFile()->get_path() << std::endl;
+    std::cerr << e.what() << std::endl;
     abort(1);
   }
   return 0;
