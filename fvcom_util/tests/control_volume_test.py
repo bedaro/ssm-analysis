@@ -68,4 +68,11 @@ class ControlVolumeTest(unittest.TestCase):
         self.assertEqual(cv.transect_directions(), [False, True, True])
         self.assertAlmostEqual(cv.area, 19/3)
 
+    @unittest.expectedFailure
+    def test_invalid_cv(self):
+        """Invalid control volume containing a non-bounding transect"""
+        tr1 = Transect(self.grid, np.array([2,4,3]))
+        tr2 = Transect(self.grid, np.array([8,9]))
+        cv = ControlVolume.from_transects([tr1, tr2])
+
 if __name__ == '__main__': unittest.main()

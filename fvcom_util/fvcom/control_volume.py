@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from itertools import groupby
 
+import numpy as np
 import matplotlib.patheffects as pe
 import geopandas as gpd
 from adjustText import adjust_text
@@ -46,13 +47,13 @@ class ControlVolume:
         g = nx.Graph(adj_dict)
 
         # Use the Graph to find which component is our control volume,
-        # based on all sections having nodes within in
+        # based on all sections having nodes within it
         if len(transects) == 1:
             # Just pick an upstream node
             node = list(upstream_nodes)[0]
         else:
             # Start with the first transect, index 0
-            # Pick a candidate note from each side of the transect
+            # Pick a candidate node from each side of the transect
             candidates = [next(iter(bns)) for bns in border_nodes[0]]
             node = None
             # We need to test every other section to handle sections that
@@ -60,8 +61,11 @@ class ControlVolume:
             # sections to connect to each other.
             for nodes in border_nodes[1:]:
                 tests = [next(iter(bns)) for bns in nodes]
-                if(not nx.has_path(g, candidates[0], tests[0]) and
-                        not nx.has_path(g, candidates[0], tests[1])):
+                paths = np.array(
+                        [[nx.has_path(g, c, t) for t in tests[:2]] for c in candidates[:2]])
+                assert (not (paths[0,0] and paths[0,1])
+                    and not (paths[1,0] and paths[1,1])), 'Loop detected, invalid CV'
+                if not paths[0,0] and not paths[0,1]:
                     node = candidates[1]
                     break
             else:
@@ -104,6 +108,8 @@ class ControlVolume:
         else:
             col = None
         ax = cv_tces.plot(col, zorder=2, **kwargs)
+        if ax is None:
+            ax = kwargs['ax']
         xmin, xmax, ymin, ymax = ax.axis()
         if base == 'elements':
             grid_base = self.grid.elements_gdf()
