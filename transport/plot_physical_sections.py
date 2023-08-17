@@ -21,9 +21,11 @@ def main():
         grid = FvcomGrid.from_output(indata)
         transects = {}
         if args.sections:
-            files = [es.EXTRACTION_OUT_PATH.format(outdir=args.outdir, name=s) for s in args.sections]
+            files = [os.path.join(args.outdir,
+                                  es.EXTRACTION_OUT_PATH.format(outdir=args.outdir, name=s)
+                                 ) for s in args.sections]
         else:
-            files = glob.glob(es.EXTRACTION_OUT_PATH.format(outdir=args.outdir, name="*"))
+            files = glob.glob(os.path.join(args.outdir, es.EXTRACTION_OUT_PATH.format(outdir=args.outdir, name="*")))
         for f in files:
             # get basename and remove .nc extension
             name = os.path.basename(f)[:-3]
