@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import unittest
-from fvcom.grid import FvcomGrid
+from fvcom.grid import *
 import numpy as np
 
 class TestFvcomGrid(unittest.TestCase):
@@ -84,6 +84,21 @@ class TestFvcomGrid(unittest.TestCase):
         self.assertEqual(1, elcoord[1, 0])
         self.assertEqual(4/3, elcoord[0, 4])
         self.assertEqual(3, elcoord[1, 4])
+
+    def test_uniform_triangular(self):
+        grid1 = uniform_triangular(sz=3)
+        self.assertEqual(6, grid1.m)
+        self.assertEqual(4, grid1.n)
+        self.assertTrue(np.allclose([1, 0], grid1.ncoord[:,1]))
+        self.assertTrue(np.allclose([1.5, np.sqrt(3)/2], grid1.ncoord[:,4]))
+        self.assertTrue(np.allclose([.5, np.sqrt(3)/6], grid1.elcoord[:,0]))
+
+        grid2 = uniform_triangular(sz=6)
+        self.assertEqual(21, grid2.m)
+        self.assertEqual(25, grid2.n)
+        self.assertTrue(np.allclose([3.5, np.sqrt(3)/2], grid2.ncoord[:,9]))
+        self.assertTrue(np.allclose([3, 2*np.sqrt(3)/2], grid2.ncoord[:,13]))
+
 
 if __name__ == '__main__':
     unittest.main()

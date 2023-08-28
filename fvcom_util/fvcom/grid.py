@@ -249,3 +249,32 @@ class FvcomGrid:
                 mesh.node(i+1, *node)
             for i,el in enumerate(self.nv.T):
                 mesh.element('E3T', i+1, *el)
+
+# Simple grid generators for testing purposes
+def uniform_triangular(sz=3):
+    """Create a simple triangular grid of equilateral triangles"""
+    ncoord = []
+    for i in range(sz):
+        y = np.sqrt(3)/2 * i
+        x0 = i / 2
+        for j in range(sz-i):
+            ncoord.append([x0 + j, y])
+    ncoord = np.array(ncoord).T
+
+    nv = []
+    for i in range(0,2*sz-3,2):
+        # handle even row
+        # First node on this row
+        v0 = sz * i // 2 + 1 - (
+            ((i // 2 - 1) ** 2 + i // 2 - 1) // 2 if i // 2 - 1 > 0 else 0
+        )
+        # First node on next row
+        v1 = v0 + sz - i // 2
+        for j in range(sz - i//2 - 1):
+            nv.append([v0 + j, v0 + j + 1, v1 + j])
+        # handle odd row
+        for j in range(sz - i//2 - 2):
+            nv.append([v1 + j, v0 + j + 1, v1 + j + 1])
+    nv = np.array(nv).T
+
+    return FvcomGrid(ncoord, nv, calc=True)
