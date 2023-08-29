@@ -20,6 +20,7 @@ class ControlVolume:
 
     def __post_init__(self):
         if self.calc:
+            object.__setattr__(self, "_elements", self._calc_elements())
             object.__setattr__(self, "_tces", self._calc_tces())
 
     @staticmethod
@@ -96,6 +97,29 @@ class ControlVolume:
     def area(self):
         """The total CV area."""
         return self.tces['geometry'].area.sum()
+
+    @property
+    def elements(self):
+        """The elements property."""
+        if self.calc:
+            return self._elements
+        else:
+            return self._calc_elements()
+
+    def _calc_elements(self):
+        elements = set()
+        node_list = list(self.nodes)
+        for ele,nv in enumerate(self.grid.nv.T):
+            if (np.isin(nv, node_list)).all():
+                elements.add(ele+1)
+        return elements
+
+    @property
+    def elements_list(self):
+        """The elements as a list"""
+        elist = list(self.elements)
+        elist.sort()
+        return elist
 
     def plot(self, data=None, label=None, base='union',
             helpers=[], **kwargs):

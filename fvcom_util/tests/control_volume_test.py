@@ -32,6 +32,10 @@ class ControlVolumeTest(unittest.TestCase):
         cv2 = cv - {2}
         self.assertEqual(cv2.nodes, {1,3})
 
+    def test_elements(self):
+        cv = ControlVolume(grid=self.grid, nodes={6,9,10,13})
+        self.assertEqual(cv.elements, {8,12})
+
     def test_single_transect(self):
         """Make a single transect across the unified channel"""
         transect = Transect(self.grid, np.array([2,4,3]))

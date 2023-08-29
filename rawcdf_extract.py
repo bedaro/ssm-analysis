@@ -38,17 +38,22 @@ def copy_ncatts(inds, invar, outvar):
     else:
         outvar.setncatts(inds[invar].__dict__)
 
-def init_output(output_cdf, indata, nodes, **kwargs):
+def init_output(output_cdf, indata, cv, **kwargs):
     args = Namespace(**kwargs)
     output = Dataset(output_cdf, "w")
     timeDim = output.createDimension('time', len(indata.dimensions['time']))
-    nodeDim = output.createDimension('node', len(nodes))
+    node_ids = np.array(cv.nodes_list)
+    nodeDim = output.createDimension('node', len(node_ids))
     nodeVar = output.createVariable('node', "i4", ('node',))
-    output['node'][:] = nodes
+    output['node'][:] = node_ids
     for node_v in ('h','x','y'):
         v = output.createVariable(node_v, "f4", ('node',))
         copy_ncatts(indata, node_v, v)
-        output[node_v][:] = indata[node_v][nodes - 1]
+        output[node_v][:] = indata[node_v][node_ids - 1]
+    element_ids = np.array(cv.elements_list)
+    eleDim = output.createDimension('nele', len(element_ids))
+    eleVar = output.createVariable('nele', "i4", ('nele',))
+    output['nele'][:] = element_ids
     timeVar = output.createVariable('time', "f4", ('time',))
     copy_ncatts(indata, 'time', timeVar)
     # Iterate over all output variables
@@ -58,7 +63,11 @@ def init_output(output_cdf, indata, nodes, **kwargs):
     # - add a 'zeta' output variable
     for var, attr in args.input_vars:
         if attr == InputAttr.ALL:
-            siglayers = indata['siglay'][:] if 'siglay' in indata.variables else DEFAULT_SIGLAYERS
+            if 'siglay' in indata.variables:
+                indata['siglay'].set_auto_mask(False)
+                siglayers = indata['siglay'][:]
+            else:
+                siglayers = DEFAULT_SIGLAYERS
             output.createDimension('siglay', len(siglayers))
             v = output.createVariable('siglay', 'f4', ('siglay',))
             if 'siglay' in indata.variables:
@@ -88,7 +97,13 @@ def init_output_vars(output, indata, **kwargs):
     args = Namespace(**kwargs)
     for var, attr in args.input_vars:
         out_name = get_var_name(args.outprefix, var, attr)
-        dims = ('time','siglay','node') if attr == InputAttr.ALL else ('time','node')
+        dims = list(indata[var].dimensions)
+        if attr != InputAttr.ALL:
+            dims.remove('siglay')
+        # Create any additional dimensions needed
+        for d in dims:
+            if d not in output.dimensions:
+                output.createDimension(d, indata.dimensions[d].size)
         if out_name in output.variables:
             if not args.force_overwrite:
                 raise Exception(f'Output variable {out_name} exists. Use --force-overwrite to use anyway')
@@ -195,15 +210,15 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
     args = Namespace(**kwargs)
     indata = MFDataset(exist_cdfs) if len(exist_cdfs) > 1 else Dataset(exist_cdfs[0])
     grid = FvcomGrid.from_output(indata)
+    cv = None
     if not os.path.exists(output_cdf):
         logger.info("Determining scope of work...")
         if args.domain_node_shapefiles:
-            cv = None
             for shp in args.domain_node_shapefiles:
                 df = gpd.read_file(shp).set_index('node_id')
                 nodes = set(df.index)
                 if cv is None:
-                    cv = ControlVolume(grid=grid, nodes=nodes)
+                    cv = ControlVolume(grid=grid, nodes=nodes, calc=True)
                 else:
                     cv = cv + nodes
             logger.debug("get_node_ids found {0} nodes in {1} shapefiles".format(
@@ -216,7 +231,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
                 waypoints = np.array(allsections[sect]['waypoints'].split(' ')).astype(int)
                 tr = Transect.shortest(grid, waypoints)
                 transects.append(tr)
-            cv = ControlVolume.from_transects(transects)
+            cv = ControlVolume.from_transects(transects, calc=True)
             logger.debug(f"control volume defined by {len(transects)} transects has {len(cv.nodes)} nodes")
         masked_nodes = np.loadtxt(args.masked_nodes_file).astype(np.int64)
         cv = cv - set(masked_nodes)
@@ -224,12 +239,12 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
         node_ids = np.array(cv.nodes_list)
 
         logger.info("Initializing output file...")
-        outdata = init_output(output_cdf, indata, node_ids, **vars(args))
+        outdata = init_output(output_cdf, indata, cv, **vars(args))
         outdata['time'][:] = indata['time'][:] / 3600 / 24
     else:
         logger.info("Opening existing output file...")
         outdata = append_output(output_cdf)
-        node_ids = outdata['node'][:]
+        cv = ControlVolume(grid=grid, nodes=set(outdata['node'][:]), calc=True)
     init_output_vars(outdata, indata, **vars(args))
 
     # Attempts to use the entire MFDataset don't seem to scale well.
@@ -245,7 +260,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
         c = MFDataset(cdfchunk) if len(cdfchunk) > 1 else Dataset(cdfchunk[0])
         chunk_times = len(c.dimensions['time'])
 
-        data = copy_data(c, outdata, i, node_ids, **vars(args))
+        data = copy_data(c, outdata, i, cv, **vars(args))
         i += chunk_times
         c.close()
 
@@ -272,7 +287,7 @@ def get_photic_mask(cdfin, node_ids):
     mask = (avglight[:] == 0) | (avglight[:] < avglight[:,[0],:] * 0.01)
     return mask
 
-def copy_data(cdfin, cdfout, timeidx, node_ids, **kwargs):
+def copy_data(cdfin, cdfout, timeidx, cv, **kwargs):
     # FIXME replace with a DepthCoordinate
     if 'siglev' in cdfin.variables:
         cdfin['siglev'].set_auto_mask(False)
@@ -283,6 +298,8 @@ def copy_data(cdfin, cdfout, timeidx, node_ids, **kwargs):
     times_ct = len(cdfin.dimensions['time'])
     alldata = {}
     photic_mask = None
+    node_ids = np.array(cv.nodes_list)
+    element_ids = None
     # Copy zeta if it's needed
     if 'zeta' in cdfout.variables:
         alldata['zeta'] = cdfin['zeta'][:, node_ids - 1]
@@ -293,7 +310,13 @@ def copy_data(cdfin, cdfout, timeidx, node_ids, **kwargs):
             slc = -1
         else:
             slc = slice(None)
-        data = cdfin[var][:, slc, node_ids - 1]
+        if 'nele' in cdfin[var].dimensions:
+            if element_ids is None:
+                element_ids = np.array(cv.elements_list)
+            spidx = element_ids - 1
+        else:
+            spidx = node_ids - 1
+        data = cdfin[var][:, slc, spidx]
         if InputAttr.PHOTIC in attr:
             if photic_mask is None:
                 photic_mask = get_photic_mask(cdfin, node_ids)
