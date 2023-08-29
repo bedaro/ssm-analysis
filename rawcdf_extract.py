@@ -145,6 +145,8 @@ def main():
             help='Specify a section config file')
     parser.add_argument("-m", dest="masked_nodes_file", type=FileType('r'),
             help="Specify a different masked nodes text file")
+    parser.add_argument("--no-masking", action="store_true",
+                        help="Don't filter out masked nodes")
     parser.add_argument("--invar", dest="input_vars", type=colon_meta,
             action="append",
             help="Extract the values of a different output variable")
@@ -218,9 +220,10 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
                 transects.append(tr)
             cv = ControlVolume.from_transects(transects)
             logger.debug(f"control volume defined by {len(transects)} transects has {len(cv.nodes)} nodes")
-        masked_nodes = np.loadtxt(args.masked_nodes_file).astype(np.int64)
-        cv = cv - set(masked_nodes)
-        logger.debug(f"{len(cv.nodes)} remain after masking")
+        if not args.no_masking:
+            masked_nodes = np.loadtxt(args.masked_nodes_file).astype(np.int64)
+            cv = cv - set(masked_nodes)
+            logger.debug(f"{len(cv.nodes)} remain after masking")
         node_ids = np.array(cv.nodes_list)
 
         logger.info("Initializing output file...")
