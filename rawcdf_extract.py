@@ -239,7 +239,6 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
             masked_nodes = np.loadtxt(args.masked_nodes_file).astype(np.int64)
             cv = cv - set(masked_nodes)
             logger.debug(f"{len(cv.nodes)} remain after masking")
-        node_ids = np.array(cv.nodes_list)
 
         logger.info("Initializing output file...")
         outdata = init_output(output_cdf, indata, cv, **vars(args))
