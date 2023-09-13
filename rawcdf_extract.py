@@ -123,6 +123,7 @@ def chunks(lst, n):
 class InputAttr(Flag):
     ALL = auto()
     BOTTOM = auto()
+    SURFACE = auto()
     MAX = auto()
     MIN = auto()
     MEAN = auto()
@@ -131,6 +132,7 @@ class InputAttr(Flag):
 attr_strings = {
     "all": InputAttr.ALL,
     "bottom": InputAttr.BOTTOM,
+    "surf": InputAttr.SURFACE,
     "min": InputAttr.MIN,
     "max": InputAttr.MAX,
     "mean": InputAttr.MEAN,
@@ -310,6 +312,8 @@ def copy_data(cdfin, cdfout, timeidx, cv, **kwargs):
         out_name = get_var_name(args.outprefix, var, attr)
         if InputAttr.BOTTOM in attr:
             slc = -1
+        elif InputAttr.SURFACE in attr:
+            slc = 0
         else:
             slc = slice(None)
         if 'nele' in cdfin[var].dimensions:
