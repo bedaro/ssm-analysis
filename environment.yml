@@ -29,4 +29,5 @@ dependencies:
   - joblib
   - py2dm
   - pyxdg
+  - libpysal
 prefix: /home/benr/mambaforge/envs/ssm-analysis
