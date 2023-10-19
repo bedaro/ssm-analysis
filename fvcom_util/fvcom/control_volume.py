@@ -122,16 +122,16 @@ class ControlVolume:
         return elist
 
     def plot(self, data=None, label=None, base='union',
-            helpers=[], **kwargs):
-        cv_tces = self.tces
+            helpers=[], data_type='nodes', **kwargs):
+        cv_gdf = self.tces if data_type == 'nodes' else self.grid.elements_gdf().loc[self.elements_list]
         if data is not None:
-            cv_tces['data'] = data
+            cv_gdf['data'] = data
             col = 'data'
             if 'legend' not in kwargs:
                 kwargs['legend'] = True
         else:
             col = None
-        ax = cv_tces.plot(col, zorder=2, **kwargs)
+        ax = cv_gdf.plot(col, zorder=2, **kwargs)
         if ax is None:
             ax = kwargs['ax']
         xmin, xmax, ymin, ymax = ax.axis()
@@ -153,7 +153,7 @@ class ControlVolume:
         avoid_x = []
         avoid_y = []
         if label is not None:
-            pt = cv_tces['geometry'].unary_union.representative_point()
+            pt = cv_gdf['geometry'].unary_union.representative_point()
             ax.annotate(label, (pt.x, pt.y), ha='center', va='center',
                     path_effects=[text_outline]
             )
