@@ -8,6 +8,7 @@ sources file into an Excel spreadsheet that can be easily edited.
 from argparse import ArgumentParser, FileType
 import logging
 import sys
+import re
 from io import StringIO
 
 import numpy as np
@@ -30,14 +31,54 @@ def read_dat_file(f, start_date, num_statevars=None):
     # The total number of discharge nodes
     num_qs = int(next(f))
     # All the node numbers with discharges
-    # FIXME this won't work if there is no comment after the node number
     nodes = []
     comments = []
+    commentre = r"FVCOM ID/Node: (\d+) / (\d+),\s+nodes/distribution : (\d+)/([\w\s\d]+),\s+([^,]+),\s+([\w\s]+),\s+(\w+),\s+([\w\s]+)"
+    fvcomids = []
+    distnodes = []
+    disttypes = []
+    names = []
+    srctypes = []
+    regions = []
+    countries = []
     for l in range(num_qs):
         line = next(f).split('!', maxsplit=1)
-        nodes.append(int(line[0].strip()))
-        comments.append(line[1].strip() if len(line) > 1 else np.nan)
-    node_df = pd.DataFrame({'Node': nodes, 'Comment': comments}).set_index('Node')
+        node = int(line[0].strip())
+        nodes.append(node)
+        if len(line) > 1:
+            comment = line[1].strip()
+            comments.append(comment)
+            m = re.match(commentre, comment)
+            fvcomids.append(int(m.group(1)) if m else np.nan)
+            if m and int(m.group(2)) != node:
+                logging.warn(f"Node {node} has a comment ({comment}) that does not appear to match")
+            distnodes.append(int(m.group(3)) if m else np.nan)
+            disttypes.append(m.group(4) if m else np.nan)
+            names.append(m.group(5) if m else np.nan)
+            srctypes.append(m.group(6) if m else np.nan)
+            regions.append(m.group(7) if m else np.nan)
+            countries.append(m.group(8) if m else np.nan)
+        else:
+            comments.append(np.nan)
+            fvcomids.append(np.nan)
+            distnodes.append(np.nan)
+            disttypes.append(np.nan)
+            names.append(np.nan)
+            srctypes.append(np.nan)
+            regions.append(np.nan)
+            countries.append(np.nan)
+    node_data = {'Node': nodes}
+    if any(comments):
+        node_data['Comment'] = comments
+    if any(fvcomids):
+        node_data['FVCOM ID'] = fvcomids
+        node_data['Dist Nodes'] = distnodes
+        node_data['Dist Type'] = disttypes
+        node_data['Name'] = names
+        node_data['Source Type'] = srctypes
+        node_data['Region'] = regions
+        node_data['Country'] = countries
+    node_df = pd.DataFrame(node_data).set_index('Node')
     nodes = np.array(nodes)
     # Depth distribution fractions into each node. Skipping the first
     # (node count) column
@@ -93,8 +134,10 @@ def read_merge_dats(riv_file, pnt_file, start_date):
     pnt_dfs['nodes']['ICM Source'] = True
     all_nodes_df = dfs['nodes'].join(pnt_dfs['nodes'], how='outer',
             rsuffix='_pnt')
-    all_nodes_df['Comment'].fillna(all_nodes_df['Comment_pnt'], inplace=True)
-    del all_nodes_df['Comment_pnt']
+    dupcols = ('Comment','FVCOM ID','Dist Nodes','Dist Type','Name','Source Type','Region','Country')
+    for c in dupcols:
+        all_nodes_df[c].fillna(all_nodes_df[f'{c}_pnt'], inplace=True)
+        del all_nodes_df[f'{c}_pnt']
     all_nodes_df['ICM Source'].fillna(False, inplace=True)
 
     # Check that the VQDIST and data DFs have the same values for matching
