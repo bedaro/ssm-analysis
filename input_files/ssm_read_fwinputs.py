@@ -136,9 +136,9 @@ def read_merge_dats(riv_file, pnt_file, start_date):
             rsuffix='_pnt')
     dupcols = ('Comment','FVCOM ID','Dist Nodes','Dist Type','Name','Source Type','Region','Country')
     for c in dupcols:
-        all_nodes_df[c].fillna(all_nodes_df[f'{c}_pnt'], inplace=True)
+        all_nodes_df.fillna({c: all_nodes_df[f'{c}_pnt'] }, inplace=True)
         del all_nodes_df[f'{c}_pnt']
-    all_nodes_df['ICM Source'].fillna(False, inplace=True)
+    all_nodes_df['ICM Source'] = ~all_nodes_df['ICM Source'].isna()
 
     # Check that the VQDIST and data DFs have the same values for matching
     # nodes
