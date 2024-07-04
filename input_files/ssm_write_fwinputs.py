@@ -39,6 +39,8 @@ def check_data(dfs, start_date):
         return (False, 'Duplicate value(s) in Nodes')
     if dfs['vqdist'].index.has_duplicates:
         return (False, 'Duplicate value(s) in VQDist')
+    if dfs['data'].index.has_duplicates:
+        return (False, 'Duplicate value(s) in Data')
     if np.any(~np.isin(dfs['vqdist'].index.values, dfs['nodes'].index.values, assume_unique=True)):
         return (False, 'At least one node in VQDist missing from Nodes')
     if np.any(~np.isin(dfs['data'].index.get_level_values(1),
@@ -55,6 +57,8 @@ def check_data(dfs, start_date):
     if np.any(dfs['vqdist'].sum(axis=1) != 1):
         return (False, 'At least one VQDist row does not sum to 1')
 
+    if np.any(pd.isna(dfs['data'])):
+        return (False, 'NaNs present in data')
     # FIXME check that no state variables are missing. If they are, add
     # columns of zeros and log a warning
 
@@ -122,7 +126,7 @@ def main():
     parser = ArgumentParser(description="Convert a point source discharge spreadsheet into SSM input files")
     parser.add_argument("infile", type=FileType('rb'),
         help="The point sources spreadsheet")
-    parser.add_argument("out_base", help="The base of the output filename (_riv.dat and _wq.dat will be appended")
+    parser.add_argument("out_base", help="The base of the output filename (_riv.dat and _wq.dat will be appended)")
     parser.add_argument("-s", "--start-date", type=pd.Timestamp,
         help="The zero date for the file. Defaults to the earliest date in the file")
     parser.add_argument("-v", "--verbose", action="store_true", dest="verbose", help="Print progress messages during the conversion")

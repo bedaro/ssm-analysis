@@ -21,9 +21,11 @@ COLS = (6,'I_TEMP', 'I_SALN', None, 'I_DAP', 'I_DFP', None, None, None,
         'I_OP_P', None, None, None, 'I_DO', None, None, None, None,
         None, 'I_DIC', 'I_Alk')
 
-def read_loadings(nodes_df, loadings_path, start_date, days):
+def read_loadings(nodes_df, loadings_path, start_date=None, days=0):
     dfs = []
     date_range_warning = False
+    last_start_date = None
+    last_end_date = None
     for i,group in nodes_df.groupby('FVCOM ID'):
         logger.info(f"FVCOM ID {i} ({group['Name'].iloc[0]})")
         srctype = group['Source Type'].iloc[0]
@@ -36,20 +38,26 @@ def read_loadings(nodes_df, loadings_path, start_date, days):
             skiprows=lambda x: x == 1)
         loading_data.index.name = 'Date'
         loading_data.sort_index(inplace=True)
-        end_date = start_date + pd.to_timedelta(days, 'D')
         first_date = loading_data.index[0]
+        if start_date is None:
+            start_date = first_date
         last_date = loading_data.index[-1]
+        end_date = (start_date + pd.to_timedelta(days, 'D')) if days > 0 else last_date
         if not date_range_warning and (end_date > last_date or start_date < first_date):
             logger.warning(f'{days} from {start_date.strftime("%Y-%m-%d")} requested, but loading data only available from {first_date.strftime("%Y-%m-%d")} to {last_date.strftime("%Y-%m-%d")}')
             date_range_warning = True
-        indexer = ((loading_data.index >= start_date) &
-            (loading_data.index <= end_date))
+        if (last_start_date is not None and last_start_date != start_date or
+                last_end_date is not None and last_end_date != end_date):
+            logger.warning(f'Loading file {f[0]} does not have the same date range as previous files')
+        last_start_date = start_date
+        last_end_date = end_date
+        indexer = slice(start_date, end_date)
         data = {}
         col_copying = True
         try:
             for incol,outcol in zip(COLS, ssm_write_fwinputs.ALL_STATEVARS):
                 if incol is None:
-                    data[outcol] = np.zeros(len(indexer.nonzero()[0]))
+                    data[outcol] = np.zeros(len(loading_data.loc[indexer]))
                 else:
                     data[outcol] = loading_data.loc[indexer, incol if type(incol) == str else loading_data.columns[incol]]
             col_copying = False
@@ -57,6 +65,8 @@ def read_loadings(nodes_df, loadings_path, start_date, days):
                 df = pd.DataFrame(data, index=loading_data.loc[indexer].index)
                 # Forward fill in missing days so if data interval is
                 # monthly, the same values are filled in for every day
+                # FIXME this won't work if start_date is not the first
+                # day of a month
                 dates = pd.date_range(start_date, end_date, freq='D')
                 dates.name = 'Date'
                 df = df.reindex(dates, method='ffill')
@@ -81,8 +91,7 @@ def main():
     parser.add_argument("outfile", type=FileType('wb'),
             help="The destination spreadsheet file")
     parser.add_argument("-s", "--start-date", type=pd.Timestamp,
-            default="2014.01.01",
-            help="The date from the loadings to use as day zero")
+            default="2014.01.01", help="The date from the loadings to use as day zero")
     parser.add_argument("-d", "--days", type=int, default=366,
             help="The number of days to read")
     parser.add_argument("-v", "--verbose", action="store_true", dest="verbose",
