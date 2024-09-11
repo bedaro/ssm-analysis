@@ -14,6 +14,7 @@ import geopandas as gpd
 import numpy as np
 
 from fvcom.grid import FvcomGrid
+from fvcom.depth import DepthCoordinate
 from fvcom.transect import Transect
 from fvcom.control_volume import ControlVolume
 
@@ -21,14 +22,6 @@ domain_nodes_shp = "gis/ssm domain nodes.shp"
 masked_nodes_txt = "gis/masked nodes.txt"
 
 logger = logging.getLogger(__name__)
-
-# FIXME replace with DepthCoordinate calls
-DEFAULT_SIGLAYERS = [-0.01581139, -0.06053274, -0.12687974, -0.20864949,
-                  -0.30326778, -0.40915567, -0.52520996, -0.65060186,
-                  -0.78467834, -0.9269075 ]
-DEFAULT_SIGLEVS = [0, -0.03162277, -0.08944271, -0.16431676,
-                   -0.2529822, -0.35355335, -0.46475798, -0.58566195,
-                   -0.7155418, -0.85381496, -1]
 
 def copy_ncatts(inds, invar, outvar):
     # some variables are different between files in a MFDataset so we need
@@ -58,21 +51,28 @@ def init_output(output_cdf, indata, cv, **kwargs):
     copy_ncatts(indata, 'time', timeVar)
     # Iterate over all output variables
     # If an extraction attribute is "all":
-    # - add the 'siglay' dimension to the output if it's not already present
+    # - add the 'siglay'/'siglev' dimensions to the output if they're not already present
+    # - add 'siglay' and 'siglev' output variables
     # - include the 'siglay' dimension on the output variable
     # - add a 'zeta' output variable
     for var, attr in args.input_vars:
         if attr == InputAttr.ALL:
-            if 'siglay' in indata.variables:
-                indata['siglay'].set_auto_mask(False)
-                siglayers = indata['siglay'][:]
+            if 'siglev' in indata.variables:
+                dcoord = DepthCoordinate.from_output(indata)
             else:
-                siglayers = DEFAULT_SIGLAYERS
+                dcoord = DepthCoordinate.from_asym_sigma(cv.grid, p_sigma=1.5)
+            siglayers = dcoord.zz[0:-1]
             output.createDimension('siglay', len(siglayers))
             v = output.createVariable('siglay', 'f4', ('siglay',))
             if 'siglay' in indata.variables:
                 copy_ncatts(indata, 'siglay', v)
             output['siglay'][:] = siglayers
+            siglevs = dcoord.z
+            output.createDimension('siglev', len(siglevs))
+            v = output.createVariable('siglev', 'f4', ('siglev',))
+            if 'siglev' in indata.variables:
+                copy_ncatts(indata, 'siglev', v)
+            output['siglev'][:] = siglevs
             if 'zeta' in indata.variables:
                 v = output.createVariable('zeta', 'f4', ('time','node'))
                 copy_ncatts(indata, 'zeta', v)
@@ -85,7 +85,7 @@ def append_output(output_cdf):
 
 def get_var_name(prefix, var, attr):
     out_name = prefix + var
-    if InputAttr.ALL not in attr:
+    if attr is not None and InputAttr.ALL not in attr:
         # iterating over a Flag isn't supported until Python 3.11. So
         # to make the corresponding list we need to do an O(n) search of
         # the InputAttr class
@@ -98,7 +98,7 @@ def init_output_vars(output, indata, **kwargs):
     for var, attr in args.input_vars:
         out_name = get_var_name(args.outprefix, var, attr)
         dims = list(indata[var].dimensions)
-        if attr != InputAttr.ALL:
+        if attr != InputAttr.ALL and 'siglay' in dims:
             dims.remove('siglay')
         # Create any additional dimensions needed
         for d in dims:
@@ -142,8 +142,13 @@ attr_strings = {
 # Expands an input variable argument into a variable name and an attribute
 # describing the vertical extraction method.
 def colon_meta(string):
-    var, attrs = string.split(':', 2)
-    attr = np.bitwise_or.reduce([attr_strings[attr] for attr in attrs.split(',')])
+    args = string.split(':', 2)
+    if len(args) > 1:
+        var, attrs = args
+        attr = np.bitwise_or.reduce([attr_strings[attr] for attr in attrs.split(',')])
+    else:
+        var = args[0]
+        attr = None
     return (var, attr)
 
 def main():
@@ -292,12 +297,13 @@ def get_photic_mask(cdfin, node_ids):
     return mask
 
 def copy_data(cdfin, cdfout, timeidx, cv, **kwargs):
-    # FIXME replace with a DepthCoordinate
     if 'siglev' in cdfin.variables:
+        dcoord = DepthCoordinate.from_output(cdfin)
         cdfin['siglev'].set_auto_mask(False)
-        siglayers = cdfin['siglev'][:-1] - cdfin['siglev'][1:]
+        #siglayers = cdfin['siglev'][:-1] - cdfin['siglev'][1:]
     else:
-        siglayers = DEFAULT_SIGLEVS
+        dcoord = DepthCoordinate.from_asym_sigma(FvcomGrid.from_output(cdfin, calc=False), p_sigma=1.5)
+    siglayers = dcoord.dz
     args = Namespace(**kwargs)
     times_ct = len(cdfin.dimensions['time'])
     alldata = {}
@@ -310,29 +316,32 @@ def copy_data(cdfin, cdfout, timeidx, cv, **kwargs):
         cdfout['zeta'][timeidx:timeidx + times_ct, :] = alldata['zeta']
     for var, attr in args.input_vars:
         out_name = get_var_name(args.outprefix, var, attr)
-        if InputAttr.BOTTOM in attr:
-            slc = -1
-        elif InputAttr.SURFACE in attr:
-            slc = 0
-        else:
-            slc = slice(None)
         if 'nele' in cdfin[var].dimensions:
             if element_ids is None:
                 element_ids = np.array(cv.elements_list)
             spidx = element_ids - 1
         else:
             spidx = node_ids - 1
-        data = cdfin[var][:, slc, spidx]
-        if InputAttr.PHOTIC in attr:
-            if photic_mask is None:
-                photic_mask = get_photic_mask(cdfin, node_ids)
-            data = np.ma.masked_array(data, mask=photic_mask)
-        if InputAttr.MIN in attr:
-            data = data.min(axis=1)
-        elif InputAttr.MAX in attr:
-            data = data.max(axis=1)
-        elif InputAttr.MEAN in attr:
-            data = np.ma.average(data, axis=1, weights=siglayers)
+        if attr is None:
+            data = cdfin[var][:, spidx]
+        else:
+            if InputAttr.BOTTOM in attr:
+                slc = -1
+            elif InputAttr.SURFACE in attr:
+                slc = 0
+            else:
+                slc = slice(None)
+            data = cdfin[var][:, slc, spidx]
+            if InputAttr.PHOTIC in attr:
+                if photic_mask is None:
+                    photic_mask = get_photic_mask(cdfin, node_ids)
+                data = np.ma.masked_array(data, mask=photic_mask)
+            if InputAttr.MIN in attr:
+                data = data.min(axis=1)
+            elif InputAttr.MAX in attr:
+                data = data.max(axis=1)
+            elif InputAttr.MEAN in attr:
+                data = np.ma.average(data, axis=1, weights=siglayers)
         logger.debug("data is shape " + str(data.shape))
         if len(cdfout[out_name].dimensions) == 3:
             cdfout[out_name][timeidx:timeidx+times_ct,:,:] = data
