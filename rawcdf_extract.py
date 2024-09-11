@@ -107,7 +107,7 @@ def init_output_vars(output, indata, **kwargs):
         if out_name in output.variables:
             if not args.force_overwrite:
                 raise Exception(f'Output variable {out_name} exists. Use --force-overwrite to use anyway')
-            if output[out_name].dimensions != dims:
+            if list(output[out_name].dimensions) != dims:
                 raise Exception(f'Output variable {out_name} has wrong dimensions {output[out_name].dimensions}\nbut I think it should have dimensions {dims}. Cannot continue.')
             # If we get here the variable is already present and looks fine
         else:
