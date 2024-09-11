@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import time
+import datetime
+import sys
 import os
 import tempfile
 import shutil
@@ -271,15 +273,41 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
 
         data = copy_data(c, outdata, i, cv, **vars(args))
         i += chunk_times
+        i_str = (" " * (int(np.log10(times_ct)) - int(np.log10(i)))) + str(i)
+        pct = str(int(i*100/times_ct))
+        pct = (" " * (3 - len(pct))) + pct
         c.close()
 
         elapsed = (time.perf_counter() - start_time)
         to_go = elapsed * (times_ct / i - 1)
+        total_time = elapsed + to_go
         total += np.sum([d.size * d.itemsize for k,d in data.items()])
-        logger.info("{0}/{1} ({2}s elapsed, {3}s to go, {4}KBps)".format(i,
-            times_ct, int(elapsed), int(to_go), int(total/elapsed/1000)))
+        rate = int(total / elapsed / 1000)
+        msg = f"{i_str}/{times_ct} [{pct}%]:  {format_time(int(elapsed), total_time)} elapsed;  {format_time(int(to_go), total_time)} to go;  {rate}KBps"
+        if args.verbose and sys.stdout.isatty():
+            sys.stdout.write(msg + '\r')
+            sys.stdout.flush()
+        else:
+            logger.info(msg)
+    if args.verbose and sys.stdout.isatty():
+        sys.stdout.write('\n')
     logger.info("Extraction finished.")
     outdata.close()
+
+def format_time(seconds, rg=None):
+    """Nice format of a time in seconds according to an optional range"""
+    if rg is None:
+        rg = seconds
+    if rg > 60:
+        if rg > 3600:
+            fstr = "%Hh%Mm%Ss"
+        else:
+            fstr = "%Mm%Ss"
+    else:
+        fstr = "%Ss"
+    dt_mid = datetime.datetime(1990, 1, 5)
+    dt = dt_mid + datetime.timedelta(seconds=seconds)
+    return dt.time().strftime(fstr)
 
 def get_photic_mask(cdfin, node_ids):
     times_per_day = int(86400 / (cdfin['time'][1] - cdfin['time'][0]))
