@@ -139,8 +139,12 @@ def iter_with_progress(iterable, *, max_iterations=None):
         if max_iterations is not None and items_processed == max_iterations:
             break # Terminate now even if the underlying iterator isn't complete
 
+def read_inflows(infile):
+    # Need to drop Deschutes River row to prevent a duplicate entry
+    return pd.read_excel(infile, sheet_name='SSM list of inflows').drop_duplicates(subset='SSM2_ID').set_index('SSM2_ID')
+
 class RegData:
-    def __init__(self, regdf):
+    def __init__(self, regfile):
         """Get all the regressions for all constituents as a giant dict
 
         Keys are station names, values are each a dict of all the regression
@@ -148,18 +152,27 @@ class RegData:
 
         Missing terms are NaN
         """
-        nulls = pd.isnull(regdf)
-        end = len(regdf) - 10
+        if not isinstance(regfile, pd.DataFrame):
+            regfile = RegData.read(regfile)
+        nulls = pd.isnull(regfile)
+        end = len(regfile) - 10
         regressions = {}
         for i in range(0, end, 11):
             if nulls['Station'][i]:
                 # blank line
                 continue
-            name = regdf.iloc[i, 0]
+            name = regfile.iloc[i, 0]
             regressions[name] = {}
-            for col in regdf.columns[1:]:
-                regressions[name][col] = regdf[col][i+1:i+10].values
+            for col in regfile.columns[1:]:
+                regressions[name][col] = regfile[col][i+1:i+10].values
         self._regressions = regressions
+
+    @staticmethod
+    def read(regfile):
+        return pd.read_excel(regfile, header=None,
+            usecols='A:Q', sheet_name='2014 WQ Regression Coeffs', names=(
+                'Station','Temp','DO','pH','NO23N','NH4N','TPN','DTPN',
+                'PON','DON','OP','TP','DTP','POP','DOP','DOC','POC'))
 
     def __repr__(self):
         return f'<RegData: {repr(self._regressions)}>'
@@ -181,8 +194,8 @@ class RegData:
         if name in self:
             return self[name][regc], name
         if name in ('Kitsap NE', 'Kitsap_Hood', 'Port Gamble'):
-            #actual_regname = 'Sinclair/Dyes Inlet' if regc in ('DOC','POC') else 'Big Beef Creek'
-            actual_regname = 'Big Beef Creek'
+            actual_regname = 'Sinclair/Dyes Inlet' if regc in ('DOC','POC') else 'Big Beef Creek'
+            #actual_regname = 'Big Beef Creek'
         elif name == 'Hamma Hamma R':
             # Ecology's spreadsheet says this source uses Duckabush for 
             # DOC/POC only (Skok for rest) but that's inconsistent with
@@ -190,9 +203,19 @@ class RegData:
             actual_regname = 'Duckabush River'
         elif name == 'NW Hood':
             # Ecology's spreadsheet says this source uses Duckabush for 
-            # DOC/POC only (Big Beef for rest) but that's inconsistent with
-            # the loading data I have from them. See regscratch.ipynb
-            actual_regname = 'Duckabush River'
+            # DOC/POC only (Big Beef for rest). The 2014 data file from
+            # their Optimization Scenarios work appears to use Duckabush
+            # for everything (see regscratch.ipynb) while the 1999-2017
+            # time series data for 2012-13 at least is using what is
+            # documented for non-DOC/POC and constant values for DOC/POC.
+            #actual_regname = 'Duckabush River'
+            #actual_regname = 'Duckabush River' if regc in ('DOC','POC') else 'Big Beef Creek'
+            if regc in ('DOC','POC'):
+                a = np.empty(9)
+                a[:] = np.nan
+                return a, 'Disabled'
+            else:
+                actual_regname = 'Big Beef Creek'
         elif name == 'Skokomish R':
             #actual_regname = 'Skookum Creek' if regc in ('POC') else 'Skokomish River'
             actual_regname = 'Skokomish River'
@@ -331,6 +354,25 @@ def update_by_regression(loading_dfs, inflows_df, regdata, sids=None, not_sids=N
 
     return newdata, updated
 
+def plot_changes(old_dfs, newdata, sid, constituents):
+    """Plot old vs new constituents for one site"""
+    data = old_dfs['nodes'].loc[old_dfs['nodes']['FVCOM ID'] == sid]
+    nodes = data.index
+    name = data.iloc[0]['Name']
+    old = old_dfs['data'].xs(nodes[0], level=1)
+    new = newdata.xs(nodes[0], level=1)
+    cols = np.min((len(constituents), 4))
+    rows = int(np.ceil(len(constituents) / 4))
+    fig, axs = plt.subplots(rows, cols, figsize=(10, 3*rows))
+    for c,ax in zip(constituents, axs.flatten()):
+        l1, = ax.plot(old.index, np.where(old['discharge'] == 0, np.nan, old[c]))
+        l2, = ax.plot(new.index, np.where(new['discharge'] == 0, np.nan, new[c]))
+        ax.set_title(c)
+    fig.suptitle(name)
+    fig.legend((l1, l2), ('Original','Updated'), loc='lower right')
+    fig.autofmt_xdate()
+    return fig
+
 def main():
     parser = ArgumentParser(description="Apply Ecology WQ River Regressions to flows")
     parser.add_argument("infile", type=FileType('rb'),
@@ -360,37 +402,20 @@ def main():
     logger.info("Reading input data")
     dfs = ssm_write_fwinputs.read_data(args.infile)
 
-    regressions_df = pd.read_excel(args.regressions_file, header=None,
-            usecols='A:Q', sheet_name='2014 WQ Regression Coeffs', names=(
-                'Station','Temp','DO','pH','NO23N','NH4N','TPN','DTPN',
-                'PON','DON','OP','TP','DTP','POP','DOP','DOC','POC'))
-    regdata = RegData(regressions_df)
-
     # Read the inflows
-    # Need to drop Deschutes River row to prevent a duplicate entry
-    inflows_df = pd.read_excel(args.regressions_file, sheet_name='SSM list of inflows').drop_duplicates(subset='SSM2_ID').set_index('SSM2_ID')
+    inflows_df = read_inflows(args.regressions_file)
 
+    # Read regression data
+    regdata = RegData(args.regressions_file)
+
+    # Perform regression update
     newdata, updated = update_by_regression(dfs, inflows_df, regdata, sids=args.sources, not_sids=args.exclude_sources)
 
     if plot:
         logger.info('Generating plots showing what changed')
         it = iter_with_progress(updated.items()) if args.verbose else updated.items()
         for sid,constituents in it:
-            data = dfs['nodes'].loc[dfs['nodes']['FVCOM ID'] == sid]
-            nodes = data.index
-            name = data.iloc[0]['Name']
-            old = dfs['data'].xs(nodes[0], level=1)
-            new = newdata.xs(nodes[0], level=1)
-            cols = np.min((len(constituents), 4))
-            rows = int(np.ceil(len(constituents) / 4))
-            fig, axs = plt.subplots(rows, cols, figsize=(10, 3*rows))
-            for c,ax in zip(constituents, axs.flatten()):
-                l1, = ax.plot(old.index, np.where(old['discharge'] == 0, np.nan, old[c]))
-                l2, = ax.plot(new.index, np.where(new['discharge'] == 0, np.nan, new[c]))
-                ax.set_title(c)
-            fig.suptitle(name)
-            fig.legend((l1, l2), ('Original','Updated'), loc='lower right')
-            fig.autofmt_xdate()
+            fig = plot_changes(dfs, newdata, sid, constituents)
             fig.savefig(plot_path / f'{sid} {name}.png')
             plt.close(fig)
 
