@@ -12,6 +12,7 @@ from argparse import ArgumentParser, Namespace, FileType
 from configparser import ConfigParser
 
 from netCDF4 import Dataset, MFDataset
+from pandas import Timestamp, Timedelta
 import geopandas as gpd
 import numpy as np
 
@@ -26,6 +27,7 @@ masked_nodes_txt = "gis/masked nodes.txt"
 logger = logging.getLogger(__name__)
 
 def copy_ncatts(inds, invar, outvar):
+    """Copy all attributes from one netCDF variable to another"""
     # some variables are different between files in a MFDataset so we need
     # to access a private attribute to get the right attributes dict
     if isinstance(inds, MFDataset) and '_mastervar' in inds[invar].__dict__:
@@ -33,10 +35,11 @@ def copy_ncatts(inds, invar, outvar):
     else:
         outvar.setncatts(inds[invar].__dict__)
 
-def init_output(output_cdf, indata, cv, **kwargs):
+def init_output(output_cdf, indata, time_slc, cv, **kwargs):
     args = Namespace(**kwargs)
     output = Dataset(output_cdf, "w")
-    timeDim = output.createDimension('time', len(indata.dimensions['time']))
+    output.model_start = args.tstart.strftime('%Y-%m-%d %X')
+    timeDim = output.createDimension('time', len(indata['time'][time_slc]))
     node_ids = np.array(cv.nodes_list)
     nodeDim = output.createDimension('node', len(node_ids))
     nodeVar = output.createVariable('node', "i4", ('node',))
@@ -51,6 +54,8 @@ def init_output(output_cdf, indata, cv, **kwargs):
     output['nele'][:] = element_ids
     timeVar = output.createVariable('time', "f4", ('time',))
     copy_ncatts(indata, 'time', timeVar)
+    # Time units are changing from seconds to days
+    timeVar.unit = 'days after model_start'
     # Iterate over all output variables
     # If an extraction attribute is "all":
     # - add the 'siglay'/'siglev' dimensions to the output if they're not already present
@@ -171,6 +176,12 @@ def main():
             help="Specify a different masked nodes text file")
     parser.add_argument("--no-masking", action="store_true",
                         help="Don't filter out masked nodes")
+    parser.add_argument("--tstart", type=Timestamp, default="2014.01.01",
+                        help="Specify the start time of the model (default: 2014 or read output)")
+    parser.add_argument("--tfrom", type=Timestamp,
+                        help="Start extract at this date/time")
+    parser.add_argument("--tto", type=Timestamp,
+                        help="Stop extract at this date/time")
     parser.add_argument("--invar", dest="input_vars", type=colon_meta,
             action="append",
             help="Extract the values of a different output variable")
@@ -248,31 +259,64 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
             masked_nodes = np.loadtxt(args.masked_nodes_file).astype(np.int64)
             cv = cv - set(masked_nodes)
             logger.debug(f"{len(cv.nodes)} remain after masking")
+        # Determine time range
+        all_times = indata['time'][:]
+        first_time = (all_times >= (args.tfrom - args.tstart).total_seconds()).nonzero()[0][0] if args.tfrom else 0
+        last_time = (all_times <= (args.tto - args.tstart).total_seconds()).nonzero()[0][-1] + 1 if args.tto else len(all_times)
+        time_slc = slice(first_time, last_time)
 
         logger.info("Initializing output file...")
-        outdata = init_output(output_cdf, indata, cv, **vars(args))
-        outdata['time'][:] = indata['time'][:] / 3600 / 24
+        outdata = init_output(output_cdf, indata, time_slc, cv, **vars(args))
+        outdata['time'][:] = indata['time'][time_slc] / 3600 / 24
     else:
         logger.info("Opening existing output file...")
         outdata = append_output(output_cdf)
+        if outdata.model_start:
+            args.tstart = Timestamp(outdata.model_start)
         cv = ControlVolume(grid=grid, nodes=set(outdata['node'][:]), calc=True)
+        all_times = indata['time'][:] / 3600 / 24
+        first_time = (all_times == outdata['time'][0]).nonzero()[0][0]
+        last_time = (all_times == outdata['time'][-1]).nonzero()[0][0] + 1
+        time_slc = slice(first_time, last_time)
+        args.tfrom = args.tstart + Timedelta(all_times[first_time] * 3600 * 24, 's')
     init_output_vars(outdata, indata, **vars(args))
+    logger.debug(f'First time: {first_time}; Last time: {last_time}')
 
     # Attempts to use the entire MFDataset don't seem to scale well.
     # Instead, I'm resorting to a blocking approach where MFDatasets are
     # created for only a few netCDF files at a time
     indata.close()
-    i = 0
+    i = 0 # The count of times actually copied
+    t = 0 # The next time index to examine
     total = 0
     logger.info("Beginning extraction...")
     start_time = time.perf_counter()
     times_ct = outdata.dimensions['time'].size
     for cdfchunk in chunks(exist_cdfs, args.chunk_size):
+        # Stop condition: we've gone past args.tto
+        if t > last_time:
+            break
         c = MFDataset(cdfchunk) if len(cdfchunk) > 1 else Dataset(cdfchunk[0])
         chunk_times = len(c.dimensions['time'])
+        # Skip condition: chunk's times are entirely before args.tfrom
+        if t + chunk_times < first_time:
+            c.close()
+            msg = f"[seeking to {args.tfrom.strftime('%Y-%m-%d')}...]"
+            if args.verbose and sys.stdout.isatty():
+                sys.stdout.write('\r' + msg)
+                sys.stdout.flush()
+            else:
+                logger.info(msg)
+            t += chunk_times
+            continue
 
-        data = copy_data(c, outdata, i, cv, **vars(args))
-        i += chunk_times
+        chunk_first = max(first_time - t, 0)
+        chunk_last = min(chunk_times, last_time - t)
+        logger.debug(f'first: {chunk_first}; last: {chunk_last}')
+        data = copy_data(c, outdata, i, slice(chunk_first, chunk_last),
+                         cv, **vars(args))
+        i += chunk_last - chunk_first
+        t += chunk_times
         i_str = (" " * (int(np.log10(times_ct)) - int(np.log10(i)))) + str(i)
         pct = str(int(i*100/times_ct))
         pct = (" " * (3 - len(pct))) + pct
@@ -285,7 +329,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
         rate = int(total / elapsed / 1000)
         msg = f"{i_str}/{times_ct} [{pct}%]:  {format_time(int(elapsed), total_time)} elapsed;  {format_time(int(to_go), total_time)} to go;  {rate}KBps"
         if args.verbose and sys.stdout.isatty():
-            sys.stdout.write(msg + '\r')
+            sys.stdout.write('\r' + msg)
             sys.stdout.flush()
         else:
             logger.info(msg)
@@ -324,23 +368,23 @@ def get_photic_mask(cdfin, node_ids):
     mask = (avglight[:] == 0) | (avglight[:] < avglight[:,[0],:] * 0.01)
     return mask
 
-def copy_data(cdfin, cdfout, timeidx, cv, **kwargs):
+def copy_data(cdfin, cdfout, timeidx, time_slc, cv, **kwargs):
     if 'siglev' in cdfin.variables:
         dcoord = DepthCoordinate.from_output(cdfin)
         cdfin['siglev'].set_auto_mask(False)
         #siglayers = cdfin['siglev'][:-1] - cdfin['siglev'][1:]
     else:
-        dcoord = DepthCoordinate.from_asym_sigma(FvcomGrid.from_output(cdfin, calc=False), p_sigma=1.5)
+        dcoord = DepthCoordinate.from_asym_sigma(cv.grid, p_sigma=1.5)
     siglayers = dcoord.dz
     args = Namespace(**kwargs)
-    times_ct = len(cdfin.dimensions['time'])
+    times_ct = len(cdfin['time'][time_slc])
     alldata = {}
     photic_mask = None
     node_ids = np.array(cv.nodes_list)
     element_ids = None
     # Copy zeta if it's needed
     if 'zeta' in cdfout.variables:
-        alldata['zeta'] = cdfin['zeta'][:, node_ids - 1]
+        alldata['zeta'] = cdfin['zeta'][time_slc, node_ids - 1]
         cdfout['zeta'][timeidx:timeidx + times_ct, :] = alldata['zeta']
     for var, attr in args.input_vars:
         out_name = get_var_name(args.outprefix, var, attr)
@@ -351,7 +395,7 @@ def copy_data(cdfin, cdfout, timeidx, cv, **kwargs):
         else:
             spidx = node_ids - 1
         if attr is None:
-            data = cdfin[var][:, spidx]
+            data = cdfin[var][time_slc, spidx]
         else:
             if InputAttr.BOTTOM in attr:
                 slc = -1
@@ -359,7 +403,7 @@ def copy_data(cdfin, cdfout, timeidx, cv, **kwargs):
                 slc = 0
             else:
                 slc = slice(None)
-            data = cdfin[var][:, slc, spidx]
+            data = cdfin[var][time_slc, slc, spidx]
             if InputAttr.PHOTIC in attr:
                 if photic_mask is None:
                     photic_mask = get_photic_mask(cdfin, node_ids)
