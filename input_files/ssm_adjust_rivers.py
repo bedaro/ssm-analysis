@@ -100,6 +100,12 @@ def main():
     parser.add_argument("adjustments", type=FileType('rb'),
             help="The flow multipliers")
     parser.add_argument("-s", "--sheet-name", help="Sheet name for the flow multipliers")
+    parser.add_argument("--source-type", choices=('River','Point Source','both'), default='River',
+                        help="Limit adjustments to given source type")
+    parser.add_argument("--regions", nargs="+",
+                        help="Limit adjustments to given regions")
+    parser.add_argument("--country", choices=('Canada','United States'),
+                        help="Limit adjustments to given country")
     parser.add_argument("-c", "--concentration-method", type=ConcMethod,
             action=EnumAction, default=ConcMethod.KEEP)
     parser.add_argument("-v", "--verbose", action="store_true", dest="verbose",
@@ -119,15 +125,32 @@ def main():
     # Fill out the adjustments to cover the entire time period of the input file
     adjs = adjs.reindex(dfs['data'].index.levels[0]).fillna(1)
 
-    logger.info("Adjusting rivers")
+    logger.info("Identifying target sources")
+    idxr = True
+    if args.source_type != 'both':
+        idxr &= dfs['nodes']['Source Type'] == args.source_type
+    if args.country is not None:
+        idxr &= dfs['nodes']['Country'] == args.country
+    if len(args.regions) > 0:
+        idxr &= np.isin(dfs['nodes']['Region'], args.regions)
+    if np.all(idxr):
+        selected_rivers = dfs['nodes'][['FVCOM ID','Name','Source Type']]
+        logger.info(f"Selected all {len(selected_rivers)} sources")
+    else:
+        selected_rivers = dfs['nodes'].loc[idxr, ['FVCOM ID','Name','Source Type']]
+        logger.info(f"Selected {len(selected_rivers)}/{len(dfs['nodes'])} sources")
+
+    logger.info("Adjusting sources")
     riv_characterizations = {}
-    # Iterate through all nodes which have a river source
-    for n,(fvid,name) in dfs['nodes'].loc[dfs['nodes']['Source Type'] == 'River', ['FVCOM ID','Name']].iterrows():
+    # Iterate through all selected sources
+    for n,(fvid,name,typ) in selected_rivers.iterrows():
+        # FIXME does not handle point sources correctly. Characterization of
+        # hydrograph has only been developed for rivers right now.
         if fvid not in riv_characterizations:
             mean_daily_climatology = build_climatology(dfs['data'].xs(n, level=1)[['discharge']])['discharge']
             mean_daily_climatology /= mean_daily_climatology.sum()
             riv_characterizations[fvid], junk = classify_stream(mean_daily_climatology.values)
-            logger.debug(f'River {name} characterized as {riv_characterizations[fvid]}')
+            logger.debug(f'{typ} {name} characterized as {riv_characterizations[fvid]}')
         # Pass the node time series data and appropriate adjustment series to adjust_stream
         adj = adjs[riv_characterizations[fvid]]
         dfs['data'].loc[(slice(None), n), :] = adjust_stream(dfs['data'].loc[(slice(None), n), :],
