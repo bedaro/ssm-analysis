@@ -19,6 +19,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from itertools import zip_longest
 
 import pandas as pd
 import numpy as np
@@ -54,6 +55,20 @@ CONSTIT_MAP = {
     'doxg': 'DO'
     # pH to DIC is handled separately
 }
+
+def constit_unit(c):
+    if c == 'temp':
+        return '$\\degree$ C'
+    elif len(c) == 4 and c.endswith('oc'):
+        return 'gC/m$^3$'
+    elif c in ('nh4','no32'):
+        return 'gN/m$^3$'
+    elif c == 'po4':
+        return 'gP/m$^3$'
+    elif c == 'dic':
+        return '\u03bcM'
+    else:
+        return 'mg/l'
 
 logger = logging.getLogger("apply_regressions")
 logging.addLevelName( logging.WARNING, "\033[1;33m%s\033[1;0m" % logging.getLevelName(logging.WARNING))
@@ -354,7 +369,7 @@ def update_by_regression(loading_dfs, inflows_df, regdata, sids=None, not_sids=N
 
     return newdata, updated
 
-def plot_changes(old_dfs, newdata, sid, constituents):
+def plot_changes(old_dfs, newdata, sid, constituents, ytype='conc'):
     """Plot old vs new constituents for one site"""
     data = old_dfs['nodes'].loc[old_dfs['nodes']['FVCOM ID'] == sid]
     nodes = data.index
@@ -363,12 +378,23 @@ def plot_changes(old_dfs, newdata, sid, constituents):
     new = newdata.xs(nodes[0], level=1)
     cols = np.min((len(constituents), 4))
     rows = int(np.ceil(len(constituents) / 4))
-    fig, axs = plt.subplots(rows, cols, figsize=(10, 3*rows))
-    for c,ax in zip(constituents, axs.flatten()):
-        l1, = ax.plot(old.index, np.where(old['discharge'] == 0, np.nan, old[c]))
-        l2, = ax.plot(new.index, np.where(new['discharge'] == 0, np.nan, new[c]))
-        ax.set_title(c)
-    fig.suptitle(name)
+    fig, axs = plt.subplots(rows, cols, figsize=(10, 3*rows), constrained_layout=True)
+    if ytype == 'loading':
+        d_old = old['discharge']
+        d_new = new['discharge']
+        missing = 0
+    else:
+        d_old = 1
+        d_new = 1
+        missing = np.nan
+    for c,ax in zip_longest(constituents, axs.flatten()):
+        if c is None:
+            ax.axis('off')
+        else:
+            l1, = ax.plot(old.index, np.where(old['discharge'] == 0, missing, old[c] * d_old))
+            l2, = ax.plot(new.index, np.where(new['discharge'] == 0, missing, new[c] * d_new))
+            ax.set_title(f'{c}, {constit_unit(c)}')
+    fig.suptitle(f"{name} {'Loading' if type == 'loading' else 'Concentration'}")
     fig.legend((l1, l2), ('Original','Updated'), loc='lower right')
     fig.autofmt_xdate()
     return fig
