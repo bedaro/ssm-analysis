@@ -299,7 +299,19 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
             args.tstart = Timestamp(outdata.model_start)
         cv = ControlVolume(grid=grid, nodes=set(outdata['node'][:]), calc=True)
         all_times = indata['time'][:] / 3600 / 24
+        if outdata['time'][0] not in all_times:
+            logger.error(f"Start extraction time {outdata['time'][0]} not present in output file")
+            logger.error(f"Output time range is {all_times[0]} - {all_times[-1]}")
+            outdata.close()
+            indata.close()
+            sys.exit(1)
         first_time = (all_times == outdata['time'][0]).nonzero()[0][0]
+        if outdata['time'][-1] not in all_times:
+            logger.error(f"End extraction time {outdata['time'][-1]} not present in output file")
+            logger.error(f"Output time range is {all_times[0]} - {all_times[-1]}")
+            outdata.close()
+            indata.close()
+            sys.exit(1)
         last_time = (all_times == outdata['time'][-1]).nonzero()[0][0] + 1
         time_slc = slice(first_time, last_time)
         args.tfrom = args.tstart + Timedelta(all_times[first_time] * 3600 * 24, 's')
