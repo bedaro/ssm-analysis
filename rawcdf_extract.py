@@ -7,14 +7,19 @@ import os
 import tempfile
 import shutil
 import logging
+from dataclasses import dataclass, field
+from multiprocessing import Pool
 from enum import Flag, auto
 from argparse import ArgumentParser, Namespace, FileType
 from configparser import ConfigParser
 
+from psutil import cpu_count
+import scipy.interpolate as interp
 from netCDF4 import Dataset, MFDataset
 from pandas import Timestamp, Timedelta
 import geopandas as gpd
 import numpy as np
+import matplotlib.pyplot as plt
 
 from fvcom.grid import FvcomGrid
 from fvcom.depth import DepthCoordinate
@@ -80,7 +85,7 @@ def init_output(output_cdf, indata, time_slc, cv, **kwargs):
             if 'siglev' in indata.variables:
                 copy_ncatts(indata, 'siglev', v)
             output['siglev'][:] = siglevs
-            if 'zeta' in indata.variables:
+            if 'zeta' in indata.variables and not args.zeta_per_run:
                 v = output.createVariable('zeta', 'f4', ('time','node'))
                 copy_ncatts(indata, 'zeta', v)
             break
@@ -90,7 +95,7 @@ def init_output(output_cdf, indata, time_slc, cv, **kwargs):
 def append_output(output_cdf):
     return Dataset(output_cdf, 'a')
 
-def get_var_name(prefix, var, attr):
+def get_var_name(prefix, var, attr=None):
     out_name = prefix + var
     if attr is not None and InputAttr.ALL not in attr:
         # iterating over a Flag isn't supported until Python 3.11. So
@@ -102,9 +107,20 @@ def get_var_name(prefix, var, attr):
 
 def init_output_vars(output, indata, **kwargs):
     args = Namespace(**kwargs)
+    if args.zeta_per_run:
+        out_name = get_var_name(args.outprefix, 'zeta')
+        dims = list(indata['zeta'].dimensions)
+        if out_name in output.variables:
+            if not args.force_overwrite:
+                raise Exception(f'Output variable {out_name} exists. Use --force-overwrite to use anyway')
+            if list(output[out_name].dimensions) != dims:
+                raise Exception(f'Output variable {out_name} has wrong dimensions {output[out_name].dimensions}\nbut I think it should have dimensions {dims}. Cannot continue.')
+        else:
+            v = output.createVariable(out_name, 'f4', dims)
+            copy_ncatts(indata, 'zeta', v)
     for var, attr in args.input_vars:
         out_name = get_var_name(args.outprefix, var, attr)
-        dims = list(indata[var].dimensions)
+        dims = list(indata[var if var != 'N2' else 'temp'].dimensions)
         if attr != InputAttr.ALL and 'siglay' in dims:
             dims.remove('siglay')
         # Create any additional dimensions needed
@@ -119,7 +135,13 @@ def init_output_vars(output, indata, **kwargs):
             # If we get here the variable is already present and looks fine
         else:
             v = output.createVariable(out_name, 'f4', dims)
-            copy_ncatts(indata, var, v)
+            if var == 'N2':
+                copy_ncatts(indata, 'temp', v)
+                v.setncatts({'long_name': 'buoy_freq',
+                                  'standard_name': 'buoy_freq',
+                                  'units': 'sec-2'})
+            else:
+                copy_ncatts(indata, var, v)
 
 # Gotten from https://stackoverflow.com/questions/312443/how-do-you-split-a-list-or-iterable-into-evenly-sized-chunks
 def chunks(lst, n):
@@ -187,6 +209,8 @@ def main():
             help="Extract the values of a different output variable")
     parser.add_argument("-v", "--verbose", action="store_true", dest="verbose",
             help="Print progress messages during the extraction")
+    parser.add_argument('-z', '--zeta-per-run', action='store_true',
+            help="Extract a separate water elevation for each run")
     parser.add_argument("-c", "--chunk-size", type=int, dest="chunk_size",
             help="Process this many CDF files at once")
     parser.add_argument("--cache", dest="cache", action="store_true",
@@ -368,11 +392,34 @@ def get_photic_mask(cdfin, node_ids):
     mask = (avglight[:] == 0) | (avglight[:] < avglight[:,[0],:] * 0.01)
     return mask
 
+g = 9.81
+
+def calc_maxn2(z, r, debug=False):
+    spl = interp.PchipInterpolator(np.flip(z), np.flip(r))
+    dpdz = spl.derivative()(z)
+    if debug:
+        fig, ax = plt.subplots()
+        ax.plot(r, z,'.')
+        zsp = np.linspace(z[0], z[-1], 100)
+        ax.plot(spl(zsp), zsp)
+    # dpdz is negative so use min() to get the "largest" value
+    # Also rho values are in kg/m3 - 1000 so add 1000 for rho0
+    return -g / (1000+z[dpdz.argmin()]) * dpdz.min()
+
+def calc_alln2(z, r, debug=False):
+    spl = interp.PchipInterpolator(np.flip(z), np.flip(r))
+    dpdz = spl.derivative()(z)
+    if debug:
+        fig, ax = plt.subplots()
+        ax.plot(r, z,'.')
+        zsp = np.linspace(z[0], z[-1], 100)
+        ax.plot(spl(zsp), zsp)
+    return -g / (1000+z) * dpdz
+
 def copy_data(cdfin, cdfout, timeidx, time_slc, cv, **kwargs):
     if 'siglev' in cdfin.variables:
         dcoord = DepthCoordinate.from_output(cdfin)
         cdfin['siglev'].set_auto_mask(False)
-        #siglayers = cdfin['siglev'][:-1] - cdfin['siglev'][1:]
     else:
         dcoord = DepthCoordinate.from_asym_sigma(cv.grid, p_sigma=1.5)
     siglayers = dcoord.dz
@@ -383,18 +430,52 @@ def copy_data(cdfin, cdfout, timeidx, time_slc, cv, **kwargs):
     node_ids = np.array(cv.nodes_list)
     element_ids = None
     # Copy zeta if it's needed
-    if 'zeta' in cdfout.variables:
-        alldata['zeta'] = cdfin['zeta'][time_slc, node_ids - 1]
-        cdfout['zeta'][timeidx:timeidx + times_ct, :] = alldata['zeta']
+    zetavar = get_var_name(args.outprefix, 'zeta') if args.zeta_per_run else 'zeta'
+    if zetavar in cdfout.variables:
+        alldata[zetavar] = cdfin['zeta'][time_slc, node_ids - 1]
+        cdfout[zetavar][timeidx:timeidx + times_ct, :] = alldata[zetavar]
     for var, attr in args.input_vars:
         out_name = get_var_name(args.outprefix, var, attr)
-        if 'nele' in cdfin[var].dimensions:
+        if var in cdfin.variables and 'nele' in cdfin[var].dimensions:
             if element_ids is None:
                 element_ids = np.array(cv.elements_list)
             spidx = element_ids - 1
         else:
             spidx = node_ids - 1
-        if attr is None:
+        if var == 'N2':
+            s_name = get_var_name(args.outprefix, 'salinity')
+            t_name = get_var_name(args.outprefix, 'temp')
+            if s_name not in alldata:
+                alldata[s_name] = cdfin['salinity'][time_slc,:,spidx]
+                s = alldata[s_name]
+            if t_name not in alldata:
+                alldata[t_name] = cdfin['temp'][time_slc,:,spidx]
+                t = alldata[t_name]
+            # Use FVCOM's DENS2 method to compute density at every cell
+            dens = (((s ** 3 * 6.76786136E-6 - s ** 2 * 4.8249614E-4 + s * 8.14876577E-1 - 0.22584586) * 
+               (t ** 3 * 1.667E-8 - t ** 2 * 8.164E-7 + t * 1.803E-5) +
+                1 - t ** 3 * 1.0843E-6 + t ** 2 * 9.8185E-5 - t * 4.786E-3) *
+               (s ** 3 * 6.76786136E-6 - s ** 2 * 4.8249614E-4 + s * 8.14876577E-1 + 3.895414E-2) -
+               (t - 3.98) ** 2 * (t + 283) / (503.57 * (t + 67.26)))
+            zz = dcoord.zz[:-1] 
+            M = len(cv.nodes_list)
+            KBm1 = len(zz)
+            assert dens.shape == (times_ct, KBm1, M), dens.shape
+            dens_reshape = np.swapaxes(dens, 1, 2).reshape((-1,len(zz)))
+            assert dens_reshape.shape == (times_ct * M, KBm1), dens_reshape.shape
+            z_by_loc = (np.expand_dims(zz, 1) @ np.expand_dims((cdfin['h'][node_ids - 1] + alldata[zetavar]).flatten(), 0)).T
+            assert z_by_loc.shape == (times_ct * M, KBm1), z_by_loc.shape
+            # merge the two arrays into a single input array
+            inp = np.swapaxes([z_by_loc,dens_reshape], 0, 1)
+            assert inp.shape == (times_ct * M, 2, KBm1), inp.shape
+            with Pool(min(cpu_count(logical=False), len(os.sched_getaffinity(0)))) as p:
+                if attr == InputAttr.MAX:
+                    data = np.reshape(p.starmap(calc_maxn2, inp), alldata[zetavar].shape)
+                else:
+                    data = np.reshape(p.starmap(calc_alln2, inp), s.shape)
+        elif out_name in alldata:
+            data = alldata[out_name]
+        elif attr is None:
             data = cdfin[var][time_slc, spidx]
         else:
             if InputAttr.BOTTOM in attr:
