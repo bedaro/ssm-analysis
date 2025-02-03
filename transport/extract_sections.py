@@ -23,8 +23,6 @@ from configparser import ConfigParser
 from multiprocessing import Pool
 from functools import partial
 
-os.environ['USE_PYGEOS'] = '0'
-
 from netCDF4 import Dataset, MFDataset
 import numpy as np
 import networkx as nx
@@ -40,6 +38,8 @@ import contextily as cx
 from fvcom.grid import FvcomGrid
 from fvcom.depth import DepthCoordinate
 from fvcom.transect import Transect
+sys.path.append(sys.path[0] + '/..')
+from apis import API_KEYS
 
 root_logger = logging.getLogger()
 
@@ -56,11 +56,16 @@ def dir_path(string):
         raise NotADirectoryError(string)
     return string
 
+def file_path(string):
+    if not os.path.isfile(string):
+        raise FileNotFoundError(string)
+    return string
+
 def main():
     global MAX_JOBS
     parser = ArgumentParser(description="Extract sections of transport and tracer values.")
     parser.add_argument("incdf", nargs="+", help="each input NetCDF file")
-    parser.add_argument("sectionsfile",
+    parser.add_argument("sectionsfile", type=file_path,
             help="the INI file describing the sections to extract")
     parser.add_argument("outdir",
             help="the output directory for NetCDF files")
@@ -259,16 +264,16 @@ def copy_data(name, section, infiles, time_range, per_hr, output_dir,
     times_in = time_range['intime']
     times_out = time_range['ocean_time']
     tin_slc = slice(
-            (indata['time'][:] == times_in[0]).nonzero()[0][0],
-            (indata['time'][:] == times_in[-1]).nonzero()[0][0]+1,
+            (indata['time'][:] == times_in.iloc[0]).nonzero()[0][0],
+            (indata['time'][:] == times_in.iloc[-1]).nonzero()[0][0]+1,
             per_hr)
 
     out_fn = os.path.join(output_dir, EXTRACTION_OUT_PATH.format(name=name))
     outds = Dataset(out_fn, 'a')
 
     tout_slc = slice(
-            (outds['ocean_time'][:] == times_out[0]).nonzero()[0][0],
-            (outds['ocean_time'][:] == times_out[-1]).nonzero()[0][0]+1)
+            (outds['ocean_time'][:] == times_out.iloc[0]).nonzero()[0][0],
+            (outds['ocean_time'][:] == times_out.iloc[-1]).nonzero()[0][0]+1)
     statevars = outds.vn_list.split(",")
 
     transect = section['transect']
@@ -557,17 +562,19 @@ def plot_locations(ax, grid, sections_gdf, transects):
     domain_gdf.boundary.plot(ax=ax, alpha=0.8, zorder=1)
     ax.set(ybound=(ymin,ymax), xbound=(xmin,xmax), xticklabels=(),
             yticklabels=())
+    tileset = cx.providers.Stadia.StamenTonerLite
+    tileset['url'] = 'https://tiles.stadiamaps.com/tiles/stamen_toner_lite/{z}/{x}/{y}{r}.png?api_key=' + API_KEYS['stadia']
     try:
-        cx.add_basemap(ax, crs=domain_gdf.crs, source=cx.providers.Stamen.TonerLite)
+        cx.add_basemap(ax, crs=domain_gdf.crs, source=tileset)
     except Exception as e:
         # Try with a max zoom level
-        cx.add_basemap(ax, crs=domain_gdf.crs, source=cx.providers.Stamen.TonerLite, zoom=13)
+        cx.add_basemap(ax, crs=domain_gdf.crs, source=tileset, zoom=13)
     if len(sections_gdf) > 1:
         texts = sections_gdf.apply(
                 lambda x: ax.annotate(x['name'], xy=x['geometry'].coords[0],
                     ha='center', va='center',
                     path_effects=[pe.withStroke(linewidth=3, foreground='white',
-                        alpha=0.6)]), axis=1)
+                        alpha=0.6)]), axis=1).to_list()
         # Extract x and y coordinates from all transect points
         all_x, all_y = zip(*[c for c in itertools.chain(*[g.coords for g in sections_gdf['geometry']])])
         adjust_text(texts, all_x, all_y, arrowprops=dict(arrowstyle='-'))
@@ -689,8 +696,8 @@ def make_section_plot(name, transect, outdir, depthcoord):
     depth_edges = depthcoord.z[:,np.newaxis] @ transect.midpoints[2][np.newaxis,:]
 
     for mm,dt_mo in dt_ser.groupby(lambda i: i.month):
-        it0 = dt_mo[0]
-        it1 = dt_mo[-1]
+        it0 = dt_mo.iloc[0]
+        it1 = dt_mo.iloc[-1]
 
         # form time means
         qq = q[it0:it1,:].mean(axis=0)
