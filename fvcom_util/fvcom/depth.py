@@ -52,3 +52,26 @@ class DepthCoordinate:
         """Delta between intra-vertical levels"""
         zz = self.zz
         return zz[:-2] - zz[1:-1]
+
+    def to_nc(self, ds):
+        """Output depth coordinate data to NetCDF. Pass Dataset opened in write mode"""
+        siglayDim = ds.createDimension('siglay', self.kb - 1)
+        siglevDim = ds.createDimension('siglev', self.kb)
+
+        siglayVar = ds.createVariable('siglay', 'f4', (siglayDim,))
+        siglayVar.long_name = 'Sigma Layers'
+        siglayVar.standard_name = 'ocean_sigma_coordinate'
+        siglayVar.positive = 'up'
+        siglayVar.valid_min = -1
+        siglayVar.valid_max = 0
+        siglayVar.formula_terms = 'siglay:siglay eta:zeta depth:depth'
+        siglayVar[:] = self.zz[:-1]
+
+        siglevVar = ds.createVariable('siglev', 'f4', (siglevDim,))
+        siglevVar.long_name = 'Sigma Levels'
+        siglevVar.standard_name = 'ocean_sigma_coordinate'
+        siglevVar.positive = 'up'
+        siglevVar.valid_min = -1
+        siglevVar.valid_max = 0
+        siglevVar.formula_terms = 'siglev:siglev eta:zeta depth:depth'
+        siglevVar[:] = self.z

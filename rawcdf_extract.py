@@ -40,10 +40,13 @@ def copy_ncatts(inds, invar, outvar):
     else:
         outvar.setncatts(inds[invar].__dict__)
 
-def init_output(output_cdf, indata, time_slc, cv, **kwargs):
-    args = Namespace(**kwargs)
-    output = Dataset(output_cdf, "w")
-    output.model_start = args.tstart.strftime('%Y-%m-%d %X')
+# TODO would be good to simplify time tracking into a class that holds
+# start time, end time, and the available times which can then produce slices
+# as needed
+def init_output(output_filename, indata, tstart, time_slc, cv, input_vars,
+                zeta_per_run=False, **dsargs):
+    output = Dataset(output_filename, "w", **dsargs)
+    output.model_start = tstart.strftime('%Y-%m-%d %X')
     timeDim = output.createDimension('time', len(indata['time'][time_slc]))
     node_ids = np.array(cv.nodes_list)
     nodeDim = output.createDimension('node', len(node_ids))
@@ -62,30 +65,15 @@ def init_output(output_cdf, indata, time_slc, cv, **kwargs):
     # Time units are changing from seconds to days
     timeVar.unit = 'days after model_start'
     # Iterate over all output variables
-    # If an extraction attribute is "all":
-    # - add the 'siglay'/'siglev' dimensions to the output if they're not already present
-    # - add 'siglay' and 'siglev' output variables
-    # - include the 'siglay' dimension on the output variable
-    # - add a 'zeta' output variable
-    for var, attr in args.input_vars:
+    # If an extraction attribute is "all", include depth-related info
+    for var, attr in input_vars:
         if attr == InputAttr.ALL:
             if 'siglev' in indata.variables:
                 dcoord = DepthCoordinate.from_output(indata)
             else:
                 dcoord = DepthCoordinate.from_asym_sigma(cv.grid, p_sigma=1.5)
-            siglayers = dcoord.zz[0:-1]
-            output.createDimension('siglay', len(siglayers))
-            v = output.createVariable('siglay', 'f4', ('siglay',))
-            if 'siglay' in indata.variables:
-                copy_ncatts(indata, 'siglay', v)
-            output['siglay'][:] = siglayers
-            siglevs = dcoord.z
-            output.createDimension('siglev', len(siglevs))
-            v = output.createVariable('siglev', 'f4', ('siglev',))
-            if 'siglev' in indata.variables:
-                copy_ncatts(indata, 'siglev', v)
-            output['siglev'][:] = siglevs
-            if 'zeta' in indata.variables and not args.zeta_per_run:
+            dcoord.to_nc(output)
+            if 'zeta' in indata.variables and not zeta_per_run:
                 v = output.createVariable('zeta', 'f4', ('time','node'))
                 copy_ncatts(indata, 'zeta', v)
             break
@@ -107,11 +95,12 @@ def get_var_name(prefix, var, attr=None):
 
 def init_output_vars(output, indata, **kwargs):
     args = Namespace(**kwargs)
-    if args.zeta_per_run:
+    force = 'force_overwrite' in args and args.force_overwrite
+    if 'zeta_per_run' in args and args.zeta_per_run:
         out_name = get_var_name(args.outprefix, 'zeta')
         dims = list(indata['zeta'].dimensions)
         if out_name in output.variables:
-            if not args.force_overwrite:
+            if not force:
                 raise Exception(f'Output variable {out_name} exists. Use --force-overwrite to use anyway')
             if list(output[out_name].dimensions) != dims:
                 raise Exception(f'Output variable {out_name} has wrong dimensions {output[out_name].dimensions}\nbut I think it should have dimensions {dims}. Cannot continue.')
@@ -128,7 +117,7 @@ def init_output_vars(output, indata, **kwargs):
             if d not in output.dimensions:
                 output.createDimension(d, indata.dimensions[d].size)
         if out_name in output.variables:
-            if not args.force_overwrite:
+            if not force:
                 raise Exception(f'Output variable {out_name} exists. Use --force-overwrite to use anyway')
             if list(output[out_name].dimensions) != dims:
                 raise Exception(f'Output variable {out_name} has wrong dimensions {output[out_name].dimensions}\nbut I think it should have dimensions {dims}. Cannot continue.')
@@ -290,7 +279,8 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
         time_slc = slice(first_time, last_time)
 
         logger.info("Initializing output file...")
-        outdata = init_output(output_cdf, indata, time_slc, cv, **vars(args))
+        outdata = init_output(output_cdf, indata, args.tstart, time_slc,
+                              cv, args.input_vars, zeta_per_run=args.zeta_per_run)
         outdata['time'][:] = indata['time'][time_slc] / 3600 / 24
     else:
         logger.info("Opening existing output file...")
@@ -330,7 +320,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
     times_ct = outdata.dimensions['time'].size
     for cdfchunk in chunks(exist_cdfs, args.chunk_size):
         # Stop condition: we've gone past args.tto
-        if t > last_time:
+        if t >= last_time:
             break
         c = MFDataset(cdfchunk) if len(cdfchunk) > 1 else Dataset(cdfchunk[0])
         chunk_times = len(c.dimensions['time'])
@@ -348,9 +338,8 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
 
         chunk_first = max(first_time - t, 0)
         chunk_last = min(chunk_times, last_time - t)
-        logger.debug(f'first: {chunk_first}; last: {chunk_last}')
-        data = copy_data(c, outdata, i, slice(chunk_first, chunk_last),
-                         cv, **vars(args))
+        data = copy_data(c, outdata, cv, slice(chunk_first, chunk_last),
+                         i, **vars(args))
         i += chunk_last - chunk_first
         t += chunk_times
         i_str = (" " * (int(np.log10(times_ct)) - int(np.log10(i)))) + str(i)
@@ -428,7 +417,23 @@ def calc_alln2(z, r, debug=False):
         ax.plot(spl(zsp), zsp)
     return -g / (1000+z) * dpdz
 
-def copy_data(cdfin, cdfout, timeidx, time_slc, cv, **kwargs):
+def copy_data(cdfin, cdfout, cv, time_slc, timeidx, **kwargs):
+    """Copy data from cdfin to cdfout
+
+    Parameters
+    ----------
+    cdfin: The input Dataset or MFDataset to copy from
+    cdfout: The Dataset to copy to, already initialized with dest variable
+    cv: The ControlVolume that represents the spatial range to copy from
+    time_slc: A slice object of input time indices to copy from
+    timeidx: The destination output starting time index
+    Extra arguments:
+        outprefix: required; the prefix to add to the variable in cdfout
+        input_vars: required; the list of name/attr tuple pairs representing variables to copy
+        zeta_per_run: if True, make a copy of zeta from incdf and save it with the outprefix
+
+    Returns a dict containing all data that was copied between files
+    """
     if 'siglev' in cdfin.variables:
         dcoord = DepthCoordinate.from_output(cdfin)
         cdfin['siglev'].set_auto_mask(False)
@@ -442,7 +447,10 @@ def copy_data(cdfin, cdfout, timeidx, time_slc, cv, **kwargs):
     node_ids = np.array(cv.nodes_list)
     element_ids = None
     # Copy zeta if it's needed
-    zetavar = get_var_name(args.outprefix, 'zeta') if args.zeta_per_run else 'zeta'
+    if 'zeta_per_run' in args and args.zeta_per_run:
+        zetavar = get_var_name(args.outprefix, 'zeta')
+    else:
+        zetavar = 'zeta'
     if zetavar in cdfout.variables:
         alldata[zetavar] = cdfin['zeta'][time_slc, node_ids - 1]
         cdfout[zetavar][timeidx:timeidx + times_ct, :] = alldata[zetavar]
