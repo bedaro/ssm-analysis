@@ -298,6 +298,7 @@ class FvcomStateValidator(AbsStateValidator):
         return np.zeros(self.state.grid.m)[n_slice]
 
 class EcolModelValidator(Validator):
+    """For Ecology's downloadable model outputs in NetCDF format"""
     def __init__(self, start, model_output, grid, end_date=None):
         if not isinstance(start, pd.Timestamp):
             start_date = pd.Timestamp(start)

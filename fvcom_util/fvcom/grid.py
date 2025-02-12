@@ -10,6 +10,7 @@ import pandas as pd
 import geopandas as gpd
 import py2dm
 from shapely.geometry import Point,Polygon
+import matplotlib.patheffects as pe
 
 @dataclass(frozen=True)
 class FvcomGrid:
@@ -249,6 +250,38 @@ class FvcomGrid:
                 mesh.node(i+1, *node)
             for i,el in enumerate(self.nv.T):
                 mesh.element('E3T', i+1, *el)
+
+    def to_gridfile(self, gridfile):
+        with open(gridfile, 'w') as f:
+            for i,el in enumerate(self.nv.T):
+                f.write(f"{i+1:7d} {el[0]:6d} {el[1]:6d} {el[2]:6d}\n")
+            for i,n in enumerate(self.ncoord.T):
+                f.write(f"{i+1:7d} {n[0]:11.3f} {n[1]:11.3f}\n")
+
+    def plot(self, ax=None, labels=True, tces=False):
+        """Plot nodes and elements of the grid with optional labels"""
+        if tces:
+            tces_gdf = self.tces_gdf()
+            ax = tces_gdf.boundary.plot(ax=ax, color='tab:blue', linestyle=':')
+        els_gdf = self.elements_gdf()
+        ax = els_gdf.boundary.plot(color='tab:orange', ax=ax)
+        if labels:
+            for idx,row in els_gdf.iterrows():
+                ax.annotate(text=idx, xy=row['geometry'].representative_point().coords[0],
+                            horizontalalignment='center', verticalalignment='center', color='tab:orange')
+        ns_gdf = self.nodes_gdf()
+        ns_gdf.plot(ax=ax, zorder=2, color='tab:blue')
+        if labels:
+            max_ycoord = np.max([geom.coords[0][1] for geom in ns_gdf['geometry']])
+            max_xcoord = np.max([geom.coords[0][0] for geom in ns_gdf['geometry']])
+            for idx,row in ns_gdf.iterrows():
+                coords = row['geometry'].coords[0]
+                yoffset = 5 if coords[1] < max_ycoord else -10
+                ax.annotate(idx, xy=coords, #xytext=(coords[0], coords[1] + yoffset),
+                            horizontalalignment='left' if coords[0] < max_xcoord else 'right',
+                            verticalalignment='bottom' if coords[1] < max_ycoord else 'top',
+                            color='tab:blue', path_effects=[pe.withStroke(linewidth=3, foreground='white', alpha=0.6)])
+        return ax
 
 # Simple grid generators for testing purposes
 def uniform_triangular(sz=3):

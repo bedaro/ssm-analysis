@@ -2,3 +2,5 @@
 *
 # Except this file
 !.gitignore
+# And the regression metadata I got from Ecology
+!regression_metadata.xlsx
