@@ -166,7 +166,7 @@ class Validator:
             node_selector = (df['node'] == n)
             for t,group2 in group.groupby('t'):
                 model_layer_bounds = ((self.grid.ncoord[2,n-1] + self._get_ssh(t,n-1))
-                    * self.depthcoord.zz[:-1] * -1)
+                    * self.depthcoord.z[:-1] * -1)
                 sig_is = np.searchsorted(model_layer_bounds, group2['depth'])
                 # The outer group is a copy and not a view of the underlying
                 # DataFrame. Both need to be updated here so we can do the
