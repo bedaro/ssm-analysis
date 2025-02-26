@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 
 import unittest
+import sys
 
 import numpy as np
 
 from fvcom.grid import FvcomGrid, uniform_triangular
+
+# software under test
+sys.path.insert(0, sys.path[0] + '/..')
 import vorticity
 
 class VorticityTest(unittest.TestCase):

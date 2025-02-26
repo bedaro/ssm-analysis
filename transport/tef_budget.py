@@ -4,6 +4,7 @@ from argparse import ArgumentParser
 from configparser import ConfigParser
 import os
 import os.path as path
+import sys
 from multiprocessing import Pool
 import pickle
 import logging
@@ -21,6 +22,9 @@ from fvcom.grid import FvcomGrid
 from fvcom.depth import DepthCoordinate
 from fvcom.transect import Transect
 from fvcom.control_volume import ControlVolume
+
+sys.path.append(sys.path[0] + '/../input_files')
+import ssm_write_fwinputs
 
 # From LiveOcean; add LiveOcean/alpha to conda.pth
 from zfun import filt_godin
@@ -148,7 +152,7 @@ def main():
                         help='Specify a config file for output location, rates, etc')
     parser.add_argument('--output-start-date', default='2014-01-01',
                         type=pd.Timestamp, help='Model output start date')
-    parser.add_argument('rivers', type=Dataset, help='Rivers input file (as NetCDF)')
+    parser.add_argument('rivers', type=file_path, help='Rivers input file (as Excel)')
     parser.add_argument('tef_item', help='TEF extraction of this model')
     parser.add_argument('--sections', required=True, nargs='+',
                         help='Names of sections that define a control volume')
@@ -220,7 +224,10 @@ def main():
             for v in args.statevars:
                 assert v in bulk_result['QQC'], f'Requested constituent {v} is not present in TEF data {bulkpath}'
 
-    rivers_in_cv = set(args.rivers['node'][:]) & cv.nodes
+    # Read rivers file
+    rivers_dfs = ssm_write_fwinputs.read_data(args.rivers)
+
+    rivers_in_cv = set(rivers_dfs['nodes'].index) & cv.nodes
     logger.info(f'Found {len(rivers_in_cv)} river nodes in control volume')
 
     run_name = '_'.join(args.sections) if args.name is None else args.name
@@ -241,8 +248,8 @@ def main():
     # The output times from the model run may be at a higher frequency, but
     # there should be overlap
     model_output_times = hydro_output['time'][:]
-    # river times are in hours; convert them
-    river_times = args.rivers['time'][:] * 3600
+    # river times are a DatetimeIndex; convert them to seconds
+    river_times = ((rivers_dfs['data'].index.levels[0] - args.output_start_date) / np.timedelta64(1, 's')).to_numpy()
     # The model can potentially run past the boundary conditions, and if that
     # happened we need to truncate the output
     cut_indices_model = (model_output_times > river_times.max()).nonzero()[0]
@@ -291,14 +298,12 @@ def main():
 
     # Compute Q_R from river data
     if len(rivers_in_cv) == 0:
-        river_qs = np.zeros_like(args.rivers['time'][:])
+        river_qs = np.zeros_like(river_times)
     else:
-        rivers_idxs = np.where(np.isin(np.ma.getdata(args.rivers['node'][:]),
-                               list(rivers_in_cv)))[0]
-        river_qs = args.rivers['discharge'][:,rivers_idxs].sum(axis=1)
-    logging.debug(f'Q_R shape is {river_qs.shape}')
+        allqs = rivers_dfs['data'].loc[(slice(None),list(rivers_in_cv)), 'discharge']
+        river_qs = allqs.groupby(allqs.index.get_level_values(0)).sum()
     fig, ax = plt.subplots()
-    river_dates = pd.Timestamp(args.output_start_date) + pd.to_timedelta(args.rivers['time'][:], 'H')
+    river_dates = rivers_dfs['data'].index.levels[0]
     ax.plot(river_dates, river_qs)
     ax.set(ylabel='Flow ($m^3/s$)', title=f'Total $Q_R$ inside {", ".join(args.sections)}')
     fig.savefig(path.join(outdir, 'qr.png'))
@@ -434,13 +439,13 @@ def main():
     }
 
     if len(rivers_in_cv) == 0:
-        river_qcs = {s: np.zeros_like(args.rivers['time'][:]) for s in args.statevars}
+        river_qcs = {s: np.zeros_like(river_times) for s in args.statevars}
     else:
         river_qcs = {}
+        allrivdata = rivers_dfs['data'].loc[(slice(None),list(rivers_in_cv)), :]
         for s in args.statevars:
-            river_qcs[s] = (args.rivers['discharge'][:,rivers_idxs] *
-                            args.rivers[model_river_cst_map[s]][:,rivers_idxs]
-                           ).sum(axis=1)
+            allqcs = allrivdata['discharge'] * allrivdata[model_river_cst_map[s]]
+            river_qcs[s] = allqcs.groupby(allqcs.index.get_level_values(0)).sum()
     rivers_qc_interp = {s: interp1d(river_times, river_qcs[s])(section_output_times) for s in args.statevars}
 
     for s in args.statevars:

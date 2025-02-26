@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.patheffects as pe
 from matplotlib.axes import Axes
 import geopandas as gpd
+from shapely.ops import unary_union
 from adjustText import adjust_text
 import networkx as nx
 
@@ -129,6 +130,9 @@ class ControlVolume:
         plotter.add_cv(self, label=label, data=data, data_type=data_type, **kwargs)
         plotter.build(helpers=helpers)
         return plotter.ax
+
+    def to_polygon(self):
+        return unary_union(self.tces['geometry'])
 
     def __sub__(self, ns: set):
         return ControlVolume(grid=self.grid, nodes=self.nodes - ns,

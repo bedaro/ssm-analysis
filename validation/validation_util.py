@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 from scipy.interpolate import interp1d
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import root_mean_squared_error
 from scipy.signal import argrelextrema
 import matplotlib.pyplot as plt
 from fvcom.grid import FvcomGrid
@@ -28,12 +28,16 @@ import db
 _parameter_map = pd.DataFrame({
     # FIXME handle chla: I think just take B1 and multiply by the assumed
     # chla to C ratio
-    'param': ('temp','salt','o2','nh4','no23','ph'),
-    'output_var': ('temp','salinity','DOXG','NH4','NO3','pH'),
+    'param': ('temp','salt','o2','nh4','no23','ph','chla'),
+    'output_var': ('temp','salinity','DOXG','NH4','NO3','pH',('B1','B2','B3')),
     # ICM State: temp and salinity are theoretically present but they're all 0's
-    'icmstate_var': (0, 1, 26, 12, 13, -1),
-    'ecol_var': ('Var_18','Var_19','Var_10','Var_14','Var_15','Var_32')
+    'icmstate_var': (0, 1, 26, 12, 13, -1, -1),
+    'ecol_var': ('Var_18','Var_19','Var_10','Var_14','Var_15','Var_32',('Var_12','Var_13'))
 }).set_index('param')
+
+_ratios = {
+    'chla': (37,50,1)
+}
 
 class Validator:
     """Abstract class for validation. Not meant to be instatiated directly"""
@@ -46,17 +50,28 @@ class Validator:
         self.end_date = end_date.tz_localize('US/Pacific').tz_convert('GMT')
         self.obsdfs = []
 
-    def get_obsdata(self, params, exclude_stations=None):
+    def get_obsdata(self, params, exclude_stations=None, cv=None):
         obsdatas = []
         for param in params:
-            query = "SELECT id, datetime, depth, value, location_id, cast_id "\
-                "FROM obsdata.observations obs WHERE parameter_id=%s "\
-                "AND datetime BETWEEN %s AND %s "
+            query_sel = "SELECT id, datetime, depth, value, location_id, cast_id "
+            query_from = "FROM obsdata.observations obs "
+            query_from += "INNER JOIN obsdata.stations l ON obs.location_id = l.name "
+            query_where = "WHERE obs.parameter_id=%s AND obs.datetime BETWEEN %s AND %s "
             query_params = [param, self.start_date, self.end_date]
+            # Construct the polygon in PostGIS
+            shp_poly = self.grid.to_polygon() if cv is None else cv.to_polygon()
+            poly = "SRID=32610;POLYGON((" + ', '.join([f'{x} {y}' for x, y in shp_poly.exterior.coords]) + "))"
+            query_where += f"AND ST_Within(l.geom, '{poly}') "
+            # Exclude any holes in the CV
+            if len(shp_poly.interiors) > 0:
+                for ring in shp_poly.interiors:
+                    poly = "SRID=32610;POLYGON((" + ', '.join([f'{x} {y}' for x, y in ring.coords]) + "))"
+                    query_where += f"AND NOT ST_Within(l.geom, '{poly}') "
+
             if exclude_stations is not None and len(exclude_stations):
-                query += "AND location_id NOT IN (" + ','.join(['%s' for s in exclude_stations]) + ") "
+                query_where += "AND location_id NOT IN (" + ','.join(['%s' for s in exclude_stations]) + ") "
                 query_params.extend(exclude_stations)
-            query += "ORDER BY datetime, depth"
+            query = query_sel + query_from + query_where + "ORDER BY datetime, depth"
 
             obsdata = pd.read_sql(query, con=self.engine, params=tuple(query_params), index_col='id')
             obsdata['datetime'] = pd.to_datetime(obsdata['datetime'],utc=True)
@@ -66,7 +81,7 @@ class Validator:
             obsdatas.append(obsdata)
 
         all_station_ids = pd.concat([df['location_id'] for df in obsdatas]).drop_duplicates()
-        stations = gpd.read_postgis("SELECT * FROM obsdata.stations", con=self.engine)
+        stations = gpd.read_postgis(f"SELECT * FROM obsdata.stations", con=self.engine)
         stations = stations.loc[stations['name'].isin(all_station_ids)]
 
         model_points = self.grid.nodes_gdf()
@@ -101,6 +116,7 @@ class Validator:
                 t_index, slice(None), n_index)
         match_depths = ((self.grid.ncoord[2,n_index] + self._get_ssh(t_index,n_index)) *
                 self.depthcoord.zz[:-1] * -1)
+        assert len(match_data) == len(match_depths), f"Invalid shape {match_data.shape} for match_data, should be {len(match_depths)}"
 
         # pull corresponding observed temperatures from the interpolated cast,
         # removing model results outside the interpolation range
@@ -149,7 +165,7 @@ class Validator:
             node_selector = (df['node'] == n)
             for t,group2 in group.groupby('t'):
                 model_layer_bounds = ((self.grid.ncoord[2,n-1] + self._get_ssh(t,n-1))
-                    * self.depthcoord.zz[:-1] * -1)
+                    * self.depthcoord.z[:-1] * -1)
                 sig_is = np.searchsorted(model_layer_bounds, group2['depth'])
                 # The outer group is a copy and not a view of the underlying
                 # DataFrame. Both need to be updated here so we can do the
@@ -175,13 +191,15 @@ class ModelValidator(Validator):
         - end_date: An optional end date to query data for. If not specified,
           model_output must be given, and end date will be read as the final
           output time
+
+        FIXME allow specifying a start date for the query that's later than model start
         """
         if not isinstance(start, pd.Timestamp):
             start_date = pd.Timestamp(start)
         else:
             start_date = start
         if end_date is None:
-            end_date = start_date + pd.to_timedelta(model_output['time'][-1], 'S')
+            end_date = start_date + pd.to_timedelta(model_output['time'][-1], 's')
         else:
             if not isinstance(end_date, pd.Timestamp):
                 end_date = pd.Timestamp(end_date)
@@ -204,13 +222,21 @@ class ModelValidator(Validator):
         # where in this list a given date/time could be inserted in the
         # series, and then we know the time index to extract from the NetCDF
         # file.
-        self.model_t_midpoints = self.start_date + pd.to_timedelta((model_output['time'][:-1] + model_output['time'][1:]) / 2, 'S')
+        self.model_t_midpoints = self.start_date + pd.to_timedelta((model_output['time'][:-1] + model_output['time'][1:]) / 2, 's')
 
     def get_model_match(self, param_id, t_slice, depth_slice, n_slice):
         global _parameter_map
         # get the output parameter name
         param = _parameter_map.loc[param_id, 'output_var']
-        return self.model_output[param][t_slice, depth_slice, n_slice]
+        if isinstance(param, tuple):
+            # Drop any params that aren't in output
+            included = set(param) & set(self.model_output.variables.keys())
+            return np.sum([self.model_output[p][t_slice, depth_slice, n_slice] * r for p,r in zip(included, _ratios[param_id] if param_id in _ratios else np.zeros(len(param_id)) + 1)], axis=0)
+        else:
+            v = self.model_output[param][t_slice, depth_slice, n_slice]
+            if param in _ratios:
+                v *= _ratios[param]
+            return v
 
     def get_times(self, slc=slice(None)):
         return self.start_date + pd.to_timedelta(self.model_output['time'][slc], 'S')
@@ -330,7 +356,13 @@ class EcolModelValidator(Validator):
         # get the output parameter name
         param = _parameter_map.loc[param_id, 'ecol_var']
         ijk = self._get_ijk(depth_slice, n_slice)
-        return self.model_output[param][t_slice, ijk]
+        if isinstance(param, tuple):
+            return np.sum([self.model_output[p][t_slice, ijk] * r for p,r in zip(param, _ratios[param_id] if param_id in _ratios else np.zeros(len(param_id)) + 1)], axis=0)
+        else:
+            v = self.model_output[param][t_slice, ijk]
+            if param in _ratios:
+                v *= _ratios[param]
+            return v
 
     def get_times(self, slc=slice(None)):
         ts = self.model_output.dimensions['Time'].size
@@ -375,20 +407,47 @@ def tsplot_zs(validator, location_data, weight_obs=6.8):
     values = np.concatenate([[-1], values, [-1]])
     return sigmas[argrelextrema(values, np.greater)[0][[0,-1]] - 1]
 
+# Taken from hydroeval, as this isn't available on conda-forge
+def nse(simulations, evaluation):
+    """Nash-Sutcliffe Efficiency (NSE) as per `Nash and Sutcliffe, 1970
+    <https://doi.org/10.1016/0022-1694(70)90255-6>`_.
+
+    :Calculation Details:
+        .. math::
+           E_{\\text{NSE}} = 1 - \\frac{\\sum_{i=1}^{N}[e_{i}-s_{i}]^2}
+           {\\sum_{i=1}^{N}[e_{i}-\\mu(e)]^2}
+
+        where *N* is the length of the *simulations* and *evaluation*
+        periods, *e* is the *evaluation* series, *s* is (one of) the
+        *simulations* series, and *μ* is the arithmetic mean.
+
+    """
+    nse_ = 1 - (
+            np.sum((evaluation - simulations) ** 2, axis=0, dtype=np.float64)
+            / np.sum((evaluation - np.mean(evaluation)) ** 2, dtype=np.float64)
+    )
+
+    return nse_
+
 # Compute the standard model performance statistics based on a set of
 # observations and model predictions
 def run_stats(observed, modeled):
-    fit, stats = np.polynomial.polynomial.Polynomial.fit(observed, modeled, 1, full=True)
-    rmse = mean_squared_error(observed, modeled, squared=False)
+    rmse = root_mean_squared_error(observed, modeled)
     n = len(observed)
-    r = np.corrcoef(modeled, fit(observed))[0,1]
+    try:
+        fit, stats = np.polynomial.polynomial.Polynomial.fit(observed, modeled, 1, full=True)
+        r = np.corrcoef(modeled, fit(observed))[0,1]
+    except np.linalg.LinAlgError:
+        fit = None
+        r = np.nan
+    ns = nse(modeled.to_numpy(), observed.to_numpy())
     bias = modeled.mean() - observed.mean()
-    return (fit, r, rmse, bias, n)
+    return (fit, r, rmse, ns, bias, n)
 
 # Build a plot of observed vs modeled data annotated with the fit statistics
 def plot_fit(ax, observed, modeled, title, unit=None):
     plot_margin = 0.05
-    fit, r, rmse, bias, n = run_stats(observed, modeled)
+    fit, r, rmse, ns, bias, n = run_stats(observed, modeled)
     xrange = observed.max() - observed.min()
     xmin = observed.min() - plot_margin * xrange
     xmax = observed.max() + plot_margin * xrange
@@ -402,7 +461,6 @@ def plot_fit(ax, observed, modeled, title, unit=None):
     ax.plot(xbound, fit(xbound))
     ax.grid()
     lbl_append = " ({0})".format(unit) if unit != None else ""
-    ax.set(title="%s\n$R$ = %.2f RMSE = %.2f Bias = %.2f N=%d" %
-            (title, r, rmse, bias, n),
+    ax.set(title=f"{title}\n$R$={r:.2f} RMSE={rmse:.2f} NSE={ns:.2f} Bias={bias:.2f} N={n:d}",
           ybound=(ymin,ymax), xbound=xbound, xlabel="Observed" + lbl_append,
           ylabel="Model Predicted" + lbl_append)

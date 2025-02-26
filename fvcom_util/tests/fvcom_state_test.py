@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
+# FIXME shorten test time by building a smaller grid and use FVCOM to
+# generate a restart file for it
 
 import unittest
 from tempfile import NamedTemporaryFile
+import sys
 import os
 import filecmp
 import numpy as np
@@ -14,8 +17,8 @@ from fvcom.state import FvcomState
 class TestFvcomState(unittest.TestCase):
 
     def setUp(self):
-        self.source_file = 'testdata/re_000001.dat'
-        grid = FvcomGrid.from_gridfile("testdata/ssm_grd.dat")
+        self.source_file = sys.path[0] + '/testdata/re_000001.dat'
+        grid = FvcomGrid.from_gridfile(sys.path[0] + "/testdata/ssm_grd.dat")
         dcoord = DepthCoordinate.from_asym_sigma(11, grid)
         # All optional features were off when this restart file was generated
         self.fvcom_state = FvcomState.read_restart_file(self.source_file, grid, dcoord)
@@ -41,28 +44,33 @@ class TestFvcomState(unittest.TestCase):
         nptest.assert_allclose(s, self.fvcom_state.n2e3d(s1), rtol=1e-3)
 
     def test_update(self):
-        m = 25
+        # Test node (1-based)
+        m = 35
         z = 5
-        # Element which contains this node as a vertex: just pick one
-        n = (self.fvcom_state.grid.nv[:] == m).any(axis=0).nonzero()[0][0]
+        # Element indices (1-based) which contain this node as a vertex
+        ns = (self.fvcom_state.grid.nv[:] == m).any(axis=0).nonzero()[0] + 1
         # Copy the original temperature array and reset it but with one value
         # changed
         t1 = self.fvcom_state.t1.copy(order='K')
-        old_t1 = t1[z,m]
-        old_t = self.fvcom_state.t[z,n]
-        old_rho1 = self.fvcom_state.rho1[z,m]
-        old_rho = self.fvcom_state.rho[z,n]
+        old_t1 = t1[z,m-1]
+        t = self.fvcom_state.t.copy(order='K')
+        old_ts = self.fvcom_state.t[z,ns]
+        old_rho1 = self.fvcom_state.rho1[z,m-1]
+        old_rhos = self.fvcom_state.rho[z,ns]
         # Change the temperature
-        t1[z,m] += 2
+        t1[z,m-1] += 2
         # Invoke the object's setter by reassigning t1
         self.fvcom_state.t1 = t1
 
-        self.assertEqual(self.fvcom_state.t1[z,m], old_t1 + 2)
+        self.assertAlmostEqual(self.fvcom_state.t1[z,m-1], old_t1 + 2, places=5)
         # Test that density got updated
-        self.assertNotEqual(self.fvcom_state.rho1[z,m], old_rho1)
+        self.assertNotAlmostEqual(self.fvcom_state.rho1[z,m-1], old_rho1, places=5)
         # Test that the element fields got updated
-        self.assertNotEqual(self.fvcom_state.t[z,n], old_t)
-        self.assertNotEqual(self.fvcom_state.rho[z,n], old_rho)
+        for i,n in enumerate(ns):
+            self.assertNotAlmostEqual(old_ts[i], self.fvcom_state.t[z,n], places=5,
+                                      msg=f'Element {i} temp did not get updated as expected')
+            self.assertNotAlmostEqual(old_rhos[i], self.fvcom_state.rho[z,n], places=5,
+                                      msg=f'Element {i} dens not get updated as expected')
 
 if __name__ == '__main__':
     unittest.main()

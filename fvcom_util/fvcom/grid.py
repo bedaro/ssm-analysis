@@ -1,15 +1,14 @@
 from dataclasses import dataclass, field
 from multiprocessing import Pool
 from functools import partial
-# Temporary workaround for recent geopandas
-import os
-os.environ['USE_PYGEOS'] = '0'
+import collections
 
 import numpy as np
 import pandas as pd
 import geopandas as gpd
 import py2dm
 from shapely.geometry import Point,Polygon
+from shapely.ops import unary_union
 import matplotlib.patheffects as pe
 
 @dataclass(frozen=True)
@@ -203,6 +202,9 @@ class FvcomGrid:
                 partial(FvcomGrid._meaner, a=self.ncoord), self.nv.T - 1))
         return elcoord.T
 
+    def to_polygon(self):
+        return unary_union(self.elements_gdf()['geometry'].force_2d())
+
     def _el_neis(self):
         """Computes NBE (indices of element neighbors) just like in FVCOM."""
         nbe = np.zeros((3, self.n), int)
@@ -258,6 +260,34 @@ class FvcomGrid:
             for i,n in enumerate(self.ncoord.T):
                 f.write(f"{i+1:7d} {n[0]:11.3f} {n[1]:11.3f}\n")
 
+    def to_nc(self, ds):
+        """Write grid to NetCDF file opened in write mode"""
+        nodeDim = ds.createDimension('node', self.m)
+        eleDim = ds.createDimension('nele', self.n)
+        thrDim = ds.createDimension('three', 3)
+        if self.ncoord.shape[0] == 3:
+            hVar = ds.createVariable('h', 'f4', (nodeDim,))
+            hVar.long_name = 'Bathymetry'
+            hVar.units = 'meters'
+            hVar.positive = 'down'
+            hVar.standard_name = 'depth'
+            hVar.grid = 'fvcom_grid'
+            hVar[:] = self.ncoord[2,:]
+
+        xVar = ds.createVariable('x', 'f4', (nodeDim,))
+        xVar.long_name = 'nodal x-coordinate'
+        xVar.units = 'meters'
+        xVar[:] = self.ncoord[0,:]
+
+        yVar = ds.createVariable('y', 'f4', (nodeDim,))
+        yVar.long_name = 'nodal y-coordinate'
+        yVar.units = 'meters'
+        yVar[:] = self.ncoord[1,:]
+
+        nvVar = ds.createVariable('nv', 'i4', (thrDim,eleDim))
+        nvVar.long_name = 'nodes surrounding element'
+        nvVar[:] = self.nv
+
     def plot(self, ax=None, labels=True, tces=False):
         """Plot nodes and elements of the grid with optional labels"""
         if tces:
@@ -284,14 +314,29 @@ class FvcomGrid:
         return ax
 
 # Simple grid generators for testing purposes
-def uniform_triangular(sz=3):
-    """Create a simple triangular grid of equilateral triangles"""
+def uniform_triangular(sz=3, depth=None):
+    """Create a simple triangular grid of equilateral triangles.
+
+    Pass either a number or a callable that accepts a size argument to set
+    depth on the nodes of the generated grid, otherwise the grid is
+    2-dimensional.
+    """
     ncoord = []
+    if depth is not None:
+        if callable(depth):
+            m = int(sz * (sz + 1) / 2)
+            depth = iter(depth(m))
     for i in range(sz):
         y = np.sqrt(3)/2 * i
         x0 = i / 2
         for j in range(sz-i):
-            ncoord.append([x0 + j, y])
+            coord = [x0 + j, y]
+            if depth is not None:
+                if isinstance(depth, collections.abc.Iterable):
+                    coord.append(next(depth))
+                else:
+                    coord.append(depth)
+            ncoord.append(coord)
     ncoord = np.array(ncoord).T
 
     nv = []

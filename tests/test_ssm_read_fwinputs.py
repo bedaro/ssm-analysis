@@ -1,8 +1,11 @@
 #!/usr/bin/env python
 
 import unittest
+import sys
 from io import StringIO
 import pandas as pd
+# software under test
+sys.path.insert(0, sys.path[0] + '/../input_files')
 import ssm_read_fwinputs
 
 class TestSsmReadFwinputs(unittest.TestCase):

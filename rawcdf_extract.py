@@ -7,13 +7,19 @@ import os
 import tempfile
 import shutil
 import logging
+from dataclasses import dataclass, field
+from multiprocessing import Pool
 from enum import Flag, auto
 from argparse import ArgumentParser, Namespace, FileType
 from configparser import ConfigParser
 
+from psutil import cpu_count
+import scipy.interpolate as interp
 from netCDF4 import Dataset, MFDataset
+from pandas import Timestamp, Timedelta
 import geopandas as gpd
 import numpy as np
+import matplotlib.pyplot as plt
 
 from fvcom.grid import FvcomGrid
 from fvcom.depth import DepthCoordinate
@@ -26,6 +32,7 @@ masked_nodes_txt = "gis/masked nodes.txt"
 logger = logging.getLogger(__name__)
 
 def copy_ncatts(inds, invar, outvar):
+    """Copy all attributes from one netCDF variable to another"""
     # some variables are different between files in a MFDataset so we need
     # to access a private attribute to get the right attributes dict
     if isinstance(inds, MFDataset) and '_mastervar' in inds[invar].__dict__:
@@ -33,10 +40,14 @@ def copy_ncatts(inds, invar, outvar):
     else:
         outvar.setncatts(inds[invar].__dict__)
 
-def init_output(output_cdf, indata, cv, **kwargs):
-    args = Namespace(**kwargs)
-    output = Dataset(output_cdf, "w")
-    timeDim = output.createDimension('time', len(indata.dimensions['time']))
+# TODO would be good to simplify time tracking into a class that holds
+# start time, end time, and the available times which can then produce slices
+# as needed
+def init_output(output_filename, indata, tstart, time_slc, cv, input_vars,
+                zeta_per_run=False, **dsargs):
+    output = Dataset(output_filename, "w", **dsargs)
+    output.model_start = tstart.strftime('%Y-%m-%d %X')
+    timeDim = output.createDimension('time', len(indata['time'][time_slc]))
     node_ids = np.array(cv.nodes_list)
     nodeDim = output.createDimension('node', len(node_ids))
     nodeVar = output.createVariable('node', "i4", ('node',))
@@ -51,31 +62,18 @@ def init_output(output_cdf, indata, cv, **kwargs):
     output['nele'][:] = element_ids
     timeVar = output.createVariable('time', "f4", ('time',))
     copy_ncatts(indata, 'time', timeVar)
+    # Time units are changing from seconds to days
+    timeVar.unit = 'days after model_start'
     # Iterate over all output variables
-    # If an extraction attribute is "all":
-    # - add the 'siglay'/'siglev' dimensions to the output if they're not already present
-    # - add 'siglay' and 'siglev' output variables
-    # - include the 'siglay' dimension on the output variable
-    # - add a 'zeta' output variable
-    for var, attr in args.input_vars:
+    # If an extraction attribute is "all", include depth-related info
+    for var, attr in input_vars:
         if attr == InputAttr.ALL:
             if 'siglev' in indata.variables:
                 dcoord = DepthCoordinate.from_output(indata)
             else:
                 dcoord = DepthCoordinate.from_asym_sigma(cv.grid, p_sigma=1.5)
-            siglayers = dcoord.zz[0:-1]
-            output.createDimension('siglay', len(siglayers))
-            v = output.createVariable('siglay', 'f4', ('siglay',))
-            if 'siglay' in indata.variables:
-                copy_ncatts(indata, 'siglay', v)
-            output['siglay'][:] = siglayers
-            siglevs = dcoord.z
-            output.createDimension('siglev', len(siglevs))
-            v = output.createVariable('siglev', 'f4', ('siglev',))
-            if 'siglev' in indata.variables:
-                copy_ncatts(indata, 'siglev', v)
-            output['siglev'][:] = siglevs
-            if 'zeta' in indata.variables:
+            dcoord.to_nc(output)
+            if 'zeta' in indata.variables and not zeta_per_run:
                 v = output.createVariable('zeta', 'f4', ('time','node'))
                 copy_ncatts(indata, 'zeta', v)
             break
@@ -85,7 +83,7 @@ def init_output(output_cdf, indata, cv, **kwargs):
 def append_output(output_cdf):
     return Dataset(output_cdf, 'a')
 
-def get_var_name(prefix, var, attr):
+def get_var_name(prefix, var, attr=None):
     out_name = prefix + var
     if attr is not None and InputAttr.ALL not in attr:
         # iterating over a Flag isn't supported until Python 3.11. So
@@ -97,9 +95,21 @@ def get_var_name(prefix, var, attr):
 
 def init_output_vars(output, indata, **kwargs):
     args = Namespace(**kwargs)
+    force = 'force_overwrite' in args and args.force_overwrite
+    if 'zeta_per_run' in args and args.zeta_per_run:
+        out_name = get_var_name(args.outprefix, 'zeta')
+        dims = list(indata['zeta'].dimensions)
+        if out_name in output.variables:
+            if not force:
+                raise Exception(f'Output variable {out_name} exists. Use --force-overwrite to use anyway')
+            if list(output[out_name].dimensions) != dims:
+                raise Exception(f'Output variable {out_name} has wrong dimensions {output[out_name].dimensions}\nbut I think it should have dimensions {dims}. Cannot continue.')
+        else:
+            v = output.createVariable(out_name, 'f4', dims)
+            copy_ncatts(indata, 'zeta', v)
     for var, attr in args.input_vars:
         out_name = get_var_name(args.outprefix, var, attr)
-        dims = list(indata[var].dimensions)
+        dims = list(indata[var if var != 'N2' else 'temp'].dimensions)
         if attr != InputAttr.ALL and 'siglay' in dims:
             dims.remove('siglay')
         # Create any additional dimensions needed
@@ -107,14 +117,20 @@ def init_output_vars(output, indata, **kwargs):
             if d not in output.dimensions:
                 output.createDimension(d, indata.dimensions[d].size)
         if out_name in output.variables:
-            if not args.force_overwrite:
+            if not force:
                 raise Exception(f'Output variable {out_name} exists. Use --force-overwrite to use anyway')
             if list(output[out_name].dimensions) != dims:
                 raise Exception(f'Output variable {out_name} has wrong dimensions {output[out_name].dimensions}\nbut I think it should have dimensions {dims}. Cannot continue.')
             # If we get here the variable is already present and looks fine
         else:
             v = output.createVariable(out_name, 'f4', dims)
-            copy_ncatts(indata, var, v)
+            if var == 'N2':
+                copy_ncatts(indata, 'temp', v)
+                v.setncatts({'long_name': 'buoy_freq',
+                                  'standard_name': 'buoy_freq',
+                                  'units': 'sec-2'})
+            else:
+                copy_ncatts(indata, var, v)
 
 # Gotten from https://stackoverflow.com/questions/312443/how-do-you-split-a-list-or-iterable-into-evenly-sized-chunks
 def chunks(lst, n):
@@ -171,11 +187,19 @@ def main():
             help="Specify a different masked nodes text file")
     parser.add_argument("--no-masking", action="store_true",
                         help="Don't filter out masked nodes")
+    parser.add_argument("--tstart", type=Timestamp, default="2014.01.01",
+                        help="Specify the start time of the model (default: 2014 or read output)")
+    parser.add_argument("--tfrom", type=Timestamp,
+                        help="Start extract at this date/time")
+    parser.add_argument("--tto", type=Timestamp,
+                        help="Stop extract at this date/time")
     parser.add_argument("--invar", dest="input_vars", type=colon_meta,
             action="append",
             help="Extract the values of a different output variable")
     parser.add_argument("-v", "--verbose", action="store_true", dest="verbose",
             help="Print progress messages during the extraction")
+    parser.add_argument('-z', '--zeta-per-run', action='store_true',
+            help="Extract a separate water elevation for each run")
     parser.add_argument("-c", "--chunk-size", type=int, dest="chunk_size",
             help="Process this many CDF files at once")
     parser.add_argument("--cache", dest="cache", action="store_true",
@@ -248,31 +272,76 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
             masked_nodes = np.loadtxt(args.masked_nodes_file).astype(np.int64)
             cv = cv - set(masked_nodes)
             logger.debug(f"{len(cv.nodes)} remain after masking")
+        # Determine time range
+        all_times = indata['time'][:]
+        first_time = (all_times >= (args.tfrom - args.tstart).total_seconds()).nonzero()[0][0] if args.tfrom else 0
+        last_time = (all_times <= (args.tto - args.tstart).total_seconds()).nonzero()[0][-1] + 1 if args.tto else len(all_times)
+        time_slc = slice(first_time, last_time)
 
         logger.info("Initializing output file...")
-        outdata = init_output(output_cdf, indata, cv, **vars(args))
-        outdata['time'][:] = indata['time'][:] / 3600 / 24
+        outdata = init_output(output_cdf, indata, args.tstart, time_slc,
+                              cv, args.input_vars, zeta_per_run=args.zeta_per_run)
+        outdata['time'][:] = indata['time'][time_slc] / 3600 / 24
     else:
         logger.info("Opening existing output file...")
         outdata = append_output(output_cdf)
+        if outdata.model_start:
+            args.tstart = Timestamp(outdata.model_start)
         cv = ControlVolume(grid=grid, nodes=set(outdata['node'][:]), calc=True)
+        all_times = indata['time'][:] / 3600 / 24
+        if outdata['time'][0] not in all_times:
+            logger.error(f"Start extraction time {outdata['time'][0]} not present in output file")
+            logger.error(f"Output time range is {all_times[0]} - {all_times[-1]}")
+            outdata.close()
+            indata.close()
+            sys.exit(1)
+        first_time = (all_times == outdata['time'][0]).nonzero()[0][0]
+        if outdata['time'][-1] not in all_times:
+            logger.error(f"End extraction time {outdata['time'][-1]} not present in output file")
+            logger.error(f"Output time range is {all_times[0]} - {all_times[-1]}")
+            outdata.close()
+            indata.close()
+            sys.exit(1)
+        last_time = (all_times == outdata['time'][-1]).nonzero()[0][0] + 1
+        time_slc = slice(first_time, last_time)
+        args.tfrom = args.tstart + Timedelta(all_times[first_time] * 3600 * 24, 's')
     init_output_vars(outdata, indata, **vars(args))
+    logger.debug(f'First time: {first_time}; Last time: {last_time}')
 
     # Attempts to use the entire MFDataset don't seem to scale well.
     # Instead, I'm resorting to a blocking approach where MFDatasets are
     # created for only a few netCDF files at a time
     indata.close()
-    i = 0
+    i = 0 # The count of times actually copied
+    t = 0 # The next time index to examine
     total = 0
     logger.info("Beginning extraction...")
     start_time = time.perf_counter()
     times_ct = outdata.dimensions['time'].size
     for cdfchunk in chunks(exist_cdfs, args.chunk_size):
+        # Stop condition: we've gone past args.tto
+        if t >= last_time:
+            break
         c = MFDataset(cdfchunk) if len(cdfchunk) > 1 else Dataset(cdfchunk[0])
         chunk_times = len(c.dimensions['time'])
+        # Skip condition: chunk's times are entirely before args.tfrom
+        if t + chunk_times < first_time:
+            c.close()
+            msg = f"[seeking to {args.tfrom.strftime('%Y-%m-%d')}...]"
+            if args.verbose and sys.stdout.isatty():
+                sys.stdout.write('\r' + msg)
+                sys.stdout.flush()
+            else:
+                logger.info(msg)
+            t += chunk_times
+            continue
 
-        data = copy_data(c, outdata, i, cv, **vars(args))
-        i += chunk_times
+        chunk_first = max(first_time - t, 0)
+        chunk_last = min(chunk_times, last_time - t)
+        data = copy_data(c, outdata, cv, slice(chunk_first, chunk_last),
+                         i, **vars(args))
+        i += chunk_last - chunk_first
+        t += chunk_times
         i_str = (" " * (int(np.log10(times_ct)) - int(np.log10(i)))) + str(i)
         pct = str(int(i*100/times_ct))
         pct = (" " * (3 - len(pct))) + pct
@@ -285,7 +354,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
         rate = int(total / elapsed / 1000)
         msg = f"{i_str}/{times_ct} [{pct}%]:  {format_time(int(elapsed), total_time)} elapsed;  {format_time(int(to_go), total_time)} to go;  {rate}KBps"
         if args.verbose and sys.stdout.isatty():
-            sys.stdout.write(msg + '\r')
+            sys.stdout.write('\r' + msg)
             sys.stdout.flush()
         else:
             logger.info(msg)
@@ -324,34 +393,110 @@ def get_photic_mask(cdfin, node_ids):
     mask = (avglight[:] == 0) | (avglight[:] < avglight[:,[0],:] * 0.01)
     return mask
 
-def copy_data(cdfin, cdfout, timeidx, cv, **kwargs):
+g = 9.81
+
+def calc_maxn2(z, r, debug=False):
+    spl = interp.PchipInterpolator(np.flip(z), np.flip(r))
+    dpdz = spl.derivative()(z)
+    if debug:
+        fig, ax = plt.subplots()
+        ax.plot(r, z,'.')
+        zsp = np.linspace(z[0], z[-1], 100)
+        ax.plot(spl(zsp), zsp)
+    # dpdz is negative so use min() to get the "largest" value
+    # Also rho values are in kg/m3 - 1000 so add 1000 for rho0
+    return -g / (1000+z[dpdz.argmin()]) * dpdz.min()
+
+def calc_alln2(z, r, debug=False):
+    spl = interp.PchipInterpolator(np.flip(z), np.flip(r))
+    dpdz = spl.derivative()(z)
+    if debug:
+        fig, ax = plt.subplots()
+        ax.plot(r, z,'.')
+        zsp = np.linspace(z[0], z[-1], 100)
+        ax.plot(spl(zsp), zsp)
+    return -g / (1000+z) * dpdz
+
+def copy_data(cdfin, cdfout, cv, time_slc, timeidx, **kwargs):
+    """Copy data from cdfin to cdfout
+
+    Parameters
+    ----------
+    cdfin: The input Dataset or MFDataset to copy from
+    cdfout: The Dataset to copy to, already initialized with dest variable
+    cv: The ControlVolume that represents the spatial range to copy from
+    time_slc: A slice object of input time indices to copy from
+    timeidx: The destination output starting time index
+    Extra arguments:
+        outprefix: required; the prefix to add to the variable in cdfout
+        input_vars: required; the list of name/attr tuple pairs representing variables to copy
+        zeta_per_run: if True, make a copy of zeta from incdf and save it with the outprefix
+
+    Returns a dict containing all data that was copied between files
+    """
     if 'siglev' in cdfin.variables:
         dcoord = DepthCoordinate.from_output(cdfin)
         cdfin['siglev'].set_auto_mask(False)
-        #siglayers = cdfin['siglev'][:-1] - cdfin['siglev'][1:]
     else:
-        dcoord = DepthCoordinate.from_asym_sigma(FvcomGrid.from_output(cdfin, calc=False), p_sigma=1.5)
+        dcoord = DepthCoordinate.from_asym_sigma(cv.grid, p_sigma=1.5)
     siglayers = dcoord.dz
     args = Namespace(**kwargs)
-    times_ct = len(cdfin.dimensions['time'])
+    times_ct = len(cdfin['time'][time_slc])
     alldata = {}
     photic_mask = None
     node_ids = np.array(cv.nodes_list)
     element_ids = None
     # Copy zeta if it's needed
-    if 'zeta' in cdfout.variables:
-        alldata['zeta'] = cdfin['zeta'][:, node_ids - 1]
-        cdfout['zeta'][timeidx:timeidx + times_ct, :] = alldata['zeta']
+    if 'zeta_per_run' in args and args.zeta_per_run:
+        zetavar = get_var_name(args.outprefix, 'zeta')
+    else:
+        zetavar = 'zeta'
+    if zetavar in cdfout.variables:
+        alldata[zetavar] = cdfin['zeta'][time_slc, node_ids - 1]
+        cdfout[zetavar][timeidx:timeidx + times_ct, :] = alldata[zetavar]
     for var, attr in args.input_vars:
         out_name = get_var_name(args.outprefix, var, attr)
-        if 'nele' in cdfin[var].dimensions:
+        if var in cdfin.variables and 'nele' in cdfin[var].dimensions:
             if element_ids is None:
                 element_ids = np.array(cv.elements_list)
             spidx = element_ids - 1
         else:
             spidx = node_ids - 1
-        if attr is None:
-            data = cdfin[var][:, spidx]
+        if var == 'N2':
+            s_name = get_var_name(args.outprefix, 'salinity')
+            t_name = get_var_name(args.outprefix, 'temp')
+            if s_name not in alldata:
+                alldata[s_name] = cdfin['salinity'][time_slc,:,spidx]
+                s = alldata[s_name]
+            if t_name not in alldata:
+                alldata[t_name] = cdfin['temp'][time_slc,:,spidx]
+                t = alldata[t_name]
+            # Use FVCOM's DENS2 method to compute density at every cell
+            dens = (((s ** 3 * 6.76786136E-6 - s ** 2 * 4.8249614E-4 + s * 8.14876577E-1 - 0.22584586) * 
+               (t ** 3 * 1.667E-8 - t ** 2 * 8.164E-7 + t * 1.803E-5) +
+                1 - t ** 3 * 1.0843E-6 + t ** 2 * 9.8185E-5 - t * 4.786E-3) *
+               (s ** 3 * 6.76786136E-6 - s ** 2 * 4.8249614E-4 + s * 8.14876577E-1 + 3.895414E-2) -
+               (t - 3.98) ** 2 * (t + 283) / (503.57 * (t + 67.26)))
+            zz = dcoord.zz[:-1] 
+            M = len(cv.nodes_list)
+            KBm1 = len(zz)
+            assert dens.shape == (times_ct, KBm1, M), dens.shape
+            dens_reshape = np.swapaxes(dens, 1, 2).reshape((-1,len(zz)))
+            assert dens_reshape.shape == (times_ct * M, KBm1), dens_reshape.shape
+            z_by_loc = (np.expand_dims(zz, 1) @ np.expand_dims((cdfin['h'][node_ids - 1] + alldata[zetavar]).flatten(), 0)).T
+            assert z_by_loc.shape == (times_ct * M, KBm1), z_by_loc.shape
+            # merge the two arrays into a single input array
+            inp = np.swapaxes([z_by_loc,dens_reshape], 0, 1)
+            assert inp.shape == (times_ct * M, 2, KBm1), inp.shape
+            with Pool(min(cpu_count(logical=False), len(os.sched_getaffinity(0)))) as p:
+                if attr == InputAttr.MAX:
+                    data = np.reshape(p.starmap(calc_maxn2, inp), alldata[zetavar].shape)
+                else:
+                    data = np.reshape(p.starmap(calc_alln2, inp), s.shape)
+        elif out_name in alldata:
+            data = alldata[out_name]
+        elif attr is None:
+            data = cdfin[var][time_slc, spidx]
         else:
             if InputAttr.BOTTOM in attr:
                 slc = -1
@@ -359,7 +504,7 @@ def copy_data(cdfin, cdfout, timeidx, cv, **kwargs):
                 slc = 0
             else:
                 slc = slice(None)
-            data = cdfin[var][:, slc, spidx]
+            data = cdfin[var][time_slc, slc, spidx]
             if InputAttr.PHOTIC in attr:
                 if photic_mask is None:
                     photic_mask = get_photic_mask(cdfin, node_ids)
