@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 
 import unittest
+import sys
 import numpy as np
 import pandas as pd
+
+# software under test
+sys.path.insert(0, sys.path[0] + '/../input_files')
 import ssm_adjust_rivers
 
 class TestSsmAdjustRivers(unittest.TestCase):
