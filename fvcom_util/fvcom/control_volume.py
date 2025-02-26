@@ -3,6 +3,7 @@ from itertools import groupby
 
 import numpy as np
 import matplotlib.patheffects as pe
+from matplotlib.axes import Axes
 import geopandas as gpd
 from adjustText import adjust_text
 import networkx as nx
@@ -123,50 +124,11 @@ class ControlVolume:
 
     def plot(self, data=None, label=None, base='union',
             helpers=[], data_type='nodes', **kwargs):
-        cv_gdf = self.tces if data_type == 'nodes' else self.grid.elements_gdf().loc[self.elements_list]
-        if data is not None:
-            cv_gdf['data'] = data
-            col = 'data'
-            if 'legend' not in kwargs:
-                kwargs['legend'] = True
-        else:
-            col = None
-        ax = cv_gdf.plot(col, zorder=2, **kwargs)
-        if ax is None:
-            ax = kwargs['ax']
-        xmin, xmax, ymin, ymax = ax.axis()
-        if base == 'elements':
-            grid_base = self.grid.elements_gdf()
-            grid_base.plot(ax=ax, facecolor='#ccc', edgecolors='#aaa', zorder=1)
-        elif base == 'union':
-            grid_els = self.grid.elements_gdf()
-            grid_base = gpd.GeoDataFrame({'geometry': [grid_els['geometry'].unary_union]}, crs=grid_els.crs)
-            grid_base.plot(ax=ax, facecolor='#ccc', edgecolors='k',
-                    zorder=1)
-
-        for h in helpers:
-            h.reset()
-            h.set_cv(self)
-            h(ax)
-
-        texts = []
-        avoid_x = []
-        avoid_y = []
-        if label is not None:
-            pt = cv_gdf['geometry'].unary_union.representative_point()
-            ax.annotate(label, (pt.x, pt.y), ha='center', va='center',
-                    path_effects=[text_outline]
-            )
-            avoid_x.append(pt.x)
-            avoid_y.append(pt.y)
-        ax.set(ybound=(ymin, ymax), xbound=(xmin, xmax))
-        for h in helpers:
-            texts.extend(h.texts)
-            avoid_x.extend(h.avoid_x)
-            avoid_y.extend(h.avoid_y)
-        if len(texts):
-            adjust_text(texts, avoid_x, avoid_y)
-        return ax
+        ax = kwargs['ax'] if 'ax' in kwargs else None
+        plotter = CVPlot(self.grid, ax=ax, base_type=base)
+        plotter.add_cv(self, label=label, data=data, data_type=data_type, **kwargs)
+        plotter.build(helpers=helpers)
+        return plotter.ax
 
     def __sub__(self, ns: set):
         return ControlVolume(grid=self.grid, nodes=self.nodes - ns,
@@ -175,6 +137,88 @@ class ControlVolume:
     def __add__(self, ns: set):
         return ControlVolume(grid=self.grid, nodes=self.nodes + ns,
                 calc=self.calc)
+
+@dataclass()
+class CVPlot:
+    grid: FvcomGrid
+    base_type: str = 'union'
+    ax: Axes = None
+
+    def __post_init__(self):
+        self.labels = []
+        self.avoid = []
+
+    def add_cv(self, cv, data=None, data_type='nodes', label=None,
+               avoid=True, **kwargs):
+        cv_gdf = cv.tces if data_type == 'nodes' else self.grid.elements_gdf().loc[cv.elements_list]
+        if data is not None:
+            cv_gdf['data'] = data
+            col = 'data'
+            if 'legend' not in kwargs:
+                kwargs['legend'] = True
+        else:
+            col = None
+        if self.ax is not None:
+            kwargs['ax'] = self.ax
+        ax = cv_gdf.plot(col, zorder=2, **kwargs)
+        if self.ax is None:
+            self.ax = ax
+
+        if label is not None:
+            pt = cv_gdf['geometry'].unary_union.representative_point()
+            self.labels.append((pt.x, pt.y, label))
+        if avoid:
+            cv_nodes = list(cv.nodes)
+            if len(cv_nodes) > 20:
+                # Take a random sample
+                cv_nodes = np.random.choice(cv_nodes, 20)
+            cv_node_pts = self.grid.nodes_gdf().loc[cv_nodes, 'geometry']
+            self.avoid.extend(cv_node_pts)
+
+    def build(self, helpers=[], bounds=None):
+        if bounds is None:
+            bounds = self.ax.axis()
+        elif np.ndim(bounds) == 0:
+            # Interpret as zoom level
+            b = np.array(self.ax.axis()).reshape((2, 2)).T
+            center = (b[1] + b[0]) / 2
+            dxy = (b[1] - b[0]) / (bounds * 2)
+            bounds = np.array([center - dxy, center + dxy]).T.flatten()
+
+        # Add a base grid
+        if self.base_type == 'elements':
+            grid_base = self.grid.elements_gdf()
+            grid_base.plot(ax=self.ax, facecolor='#ccc', edgecolors='#aaa', zorder=1)
+        elif self.base_type == 'union':
+            grid_els = self.grid.elements_gdf()
+            grid_base = gpd.GeoDataFrame({'geometry': [grid_els['geometry'].unary_union]}, crs=grid_els.crs)
+            grid_base.plot(ax=self.ax, facecolor='#ccc', edgecolors='k',
+                    zorder=1)
+
+        xmin, xmax, ymin, ymax = bounds
+        self.ax.set(ybound=(ymin, ymax), xbound=(xmin, xmax))
+
+        texts = []
+        for x,y,l in self.labels:
+            t = self.ax.annotate(l, (x, y), ha='center', va='center',
+                                 path_effects=[text_outline]
+            )
+            texts.append(t)
+
+        for h in helpers:
+            h.reset()
+            h.set_cv(self)
+            h(ax)
+            texts.extend(h.texts)
+            self.avoid.extend([Point(x, y) for x, y in zip(h.avoid_x, h.avoid_y)])
+
+        if len(texts):
+            avoid_x = []
+            avoid_y = []
+            for pt in self.avoid:
+                avoid_x.append(pt.x)
+                avoid_y.append(pt.y)
+            adjust_text(texts, avoid_x, avoid_y)
 
 @dataclass(frozen=True, kw_only=True)
 class TransectControlVolume(ControlVolume):
