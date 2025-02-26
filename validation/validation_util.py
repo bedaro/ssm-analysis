@@ -407,6 +407,28 @@ def tsplot_zs(validator, location_data, weight_obs=6.8):
     values = np.concatenate([[-1], values, [-1]])
     return sigmas[argrelextrema(values, np.greater)[0][[0,-1]] - 1]
 
+# Taken from hydroeval, as this isn't available on conda-forge
+def nse(simulations, evaluation):
+    """Nash-Sutcliffe Efficiency (NSE) as per `Nash and Sutcliffe, 1970
+    <https://doi.org/10.1016/0022-1694(70)90255-6>`_.
+
+    :Calculation Details:
+        .. math::
+           E_{\\text{NSE}} = 1 - \\frac{\\sum_{i=1}^{N}[e_{i}-s_{i}]^2}
+           {\\sum_{i=1}^{N}[e_{i}-\\mu(e)]^2}
+
+        where *N* is the length of the *simulations* and *evaluation*
+        periods, *e* is the *evaluation* series, *s* is (one of) the
+        *simulations* series, and *μ* is the arithmetic mean.
+
+    """
+    nse_ = 1 - (
+            np.sum((evaluation - simulations) ** 2, axis=0, dtype=np.float64)
+            / np.sum((evaluation - np.mean(evaluation)) ** 2, dtype=np.float64)
+    )
+
+    return nse_
+
 # Compute the standard model performance statistics based on a set of
 # observations and model predictions
 def run_stats(observed, modeled):
@@ -418,13 +440,14 @@ def run_stats(observed, modeled):
     except np.linalg.LinAlgError:
         fit = None
         r = np.nan
+    ns = nse(modeled.to_numpy(), observed.to_numpy())
     bias = modeled.mean() - observed.mean()
-    return (fit, r, rmse, bias, n)
+    return (fit, r, rmse, ns, bias, n)
 
 # Build a plot of observed vs modeled data annotated with the fit statistics
 def plot_fit(ax, observed, modeled, title, unit=None):
     plot_margin = 0.05
-    fit, r, rmse, bias, n = run_stats(observed, modeled)
+    fit, r, rmse, ns, bias, n = run_stats(observed, modeled)
     xrange = observed.max() - observed.min()
     xmin = observed.min() - plot_margin * xrange
     xmax = observed.max() + plot_margin * xrange
@@ -438,7 +461,6 @@ def plot_fit(ax, observed, modeled, title, unit=None):
     ax.plot(xbound, fit(xbound))
     ax.grid()
     lbl_append = " ({0})".format(unit) if unit != None else ""
-    ax.set(title="%s\n$R$ = %.2f RMSE = %.2f Bias = %.2f N=%d" %
-            (title, r, rmse, bias, n),
+    ax.set(title=f"{title}\n$R$={r:.2f} RMSE={rmse:.2f} NSE={ns:.2f} Bias={bias:.2f} N={n:d}",
           ybound=(ymin,ymax), xbound=xbound, xlabel="Observed" + lbl_append,
           ylabel="Model Predicted" + lbl_append)
