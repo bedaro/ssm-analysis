@@ -141,7 +141,7 @@ class FvcomState:
         for i in range(self.grid.n):
             # Get the node indices at each vertex of this element
             n1, n2, n3 = [self.grid.nv[j,i] for j in range(3)]
-            evar[:,i+1] = np.mean([nvar[:,n1], nvar[:,n2], nvar[:,n3]], axis=0)
+            evar[:,i+1] = np.mean(nvar[:,[n1-1,n2-1,n3-1]], axis=1)
         return evar
 
     def __setattr__(self, name, value):
