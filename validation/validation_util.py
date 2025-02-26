@@ -55,19 +55,18 @@ class Validator:
         for param in params:
             query_sel = "SELECT id, datetime, depth, value, location_id, cast_id "
             query_from = "FROM obsdata.observations obs "
+            query_from += "INNER JOIN obsdata.stations l ON obs.location_id = l.name "
             query_where = "WHERE obs.parameter_id=%s AND obs.datetime BETWEEN %s AND %s "
             query_params = [param, self.start_date, self.end_date]
-            if cv is not None:
-                query_from += "INNER JOIN obsdata.stations l ON obs.location_id = l.name "
-                # Construct the polygon in PostGIS
-                shp_poly = cv.to_polygon()
-                poly = "SRID=32610;POLYGON((" + ', '.join([f'{x} {y}' for x, y in shp_poly.exterior.coords]) + "))"
-                query_where += f"AND ST_Within(l.geom, '{poly}') "
-                # Exclude any holes in the CV
-                if len(shp_poly.interiors) > 0:
-                    for ring in shp_poly.interiors:
-                        poly = "SRID=32610;POLYGON((" + ', '.join([f'{x} {y}' for x, y in ring.coords]) + "))"
-                        query_where += f"AND NOT ST_Within(l.geom, '{poly}') "
+            # Construct the polygon in PostGIS
+            shp_poly = self.grid.to_polygon() if cv is None else cv.to_polygon()
+            poly = "SRID=32610;POLYGON((" + ', '.join([f'{x} {y}' for x, y in shp_poly.exterior.coords]) + "))"
+            query_where += f"AND ST_Within(l.geom, '{poly}') "
+            # Exclude any holes in the CV
+            if len(shp_poly.interiors) > 0:
+                for ring in shp_poly.interiors:
+                    poly = "SRID=32610;POLYGON((" + ', '.join([f'{x} {y}' for x, y in ring.coords]) + "))"
+                    query_where += f"AND NOT ST_Within(l.geom, '{poly}') "
 
             if exclude_stations is not None and len(exclude_stations):
                 query_where += "AND location_id NOT IN (" + ','.join(['%s' for s in exclude_stations]) + ") "
@@ -230,7 +229,9 @@ class ModelValidator(Validator):
         # get the output parameter name
         param = _parameter_map.loc[param_id, 'output_var']
         if isinstance(param, tuple):
-            return np.sum([self.model_output[p][t_slice, depth_slice, n_slice] * r for p,r in zip(param, _ratios[param_id] if param_id in _ratios else np.zeros(len(param_id)) + 1)], axis=0)
+            # Drop any params that aren't in output
+            included = set(param) & set(self.model_output.variables.keys())
+            return np.sum([self.model_output[p][t_slice, depth_slice, n_slice] * r for p,r in zip(included, _ratios[param_id] if param_id in _ratios else np.zeros(len(param_id)) + 1)], axis=0)
         else:
             v = self.model_output[param][t_slice, depth_slice, n_slice]
             if param in _ratios:

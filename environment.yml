@@ -23,7 +23,7 @@ dependencies:
   - rtree
   - openpyxl
   - netcdf4
-  - geopandas
+  - geopandas[version='>=1']
   - shapely
   - networkx
   - joblib

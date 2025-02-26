@@ -8,6 +8,7 @@ import pandas as pd
 import geopandas as gpd
 import py2dm
 from shapely.geometry import Point,Polygon
+from shapely.ops import unary_union
 import matplotlib.patheffects as pe
 
 @dataclass(frozen=True)
@@ -200,6 +201,9 @@ class FvcomGrid:
             elcoord = np.array(p.map(
                 partial(FvcomGrid._meaner, a=self.ncoord), self.nv.T - 1))
         return elcoord.T
+
+    def to_polygon(self):
+        return unary_union(self.elements_gdf()['geometry'].force_2d())
 
     def _el_neis(self):
         """Computes NBE (indices of element neighbors) just like in FVCOM."""
