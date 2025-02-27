@@ -356,3 +356,63 @@ def uniform_triangular(sz=3, depth=None):
     nv = np.array(nv).T
 
     return FvcomGrid(ncoord, nv, calc=True)
+
+def uniform_hex(sz=3, depth=None):
+    """Create a grid of equilateral triangles that supports velocity fields.
+
+    Grid will be shaped like a hexagon. Size parameter determines the
+    number of verticies per side, so the resultant hexagon will be twice
+    the size parameter in width.
+
+    Pass either a number or a callable that accepts a size argument to set
+    depth on the nodes of the generated grid, otherwise the grid is
+    2-dimensional.
+    """
+    ncoord = []
+    if depth is not None:
+        if callable(depth):
+            m = int(sz * (sz + 1) / 2) - 3
+            depth = iter(depth(m))
+    def ct_on_row(i):
+        return 2 * sz + 1 - np.abs(i - sz)
+    for i in range(sz * 2 + 1):
+        y = np.sqrt(3)/2 * i
+        x0 = np.abs(-i / 2 + sz / 2)
+        for j in range(ct_on_row(i)):
+            coord = [x0 + j, y]
+            if depth is not None:
+                if isinstance(depth, collections.abc.Iterable):
+                    coord.append(next(depth))
+                else:
+                    coord.append(depth)
+            ncoord.append(coord)
+    ncoord = np.array(ncoord).T
+
+    nv = []
+    # Bottom half of hexagon
+    for i in range(sz):
+        # First node on this row
+        v0 = 1 + int(i * (i + 2 * sz + 1) / 2)
+        # First node on next row
+        v1 = v0 + sz + i + 1
+        # handle even row
+        for j in range(v0, v1-1):
+            nv.append([j, j + 1, v1 - v0 + j + (1 if i < sz else 0)])
+        # handle odd row
+        for j in range(sz + i + 1):
+            nv.append([v1 + j + (1 if i == sz else 0), v0 + j,
+                       v1 + j + (2 if i == sz else 1)])
+    # Top half of hexagon
+    for i in range(sz,2*sz):
+        v0 = 1 - sz**2 - sz + 3 * sz * i - int(i * (i - 3) / 2)
+        # First node on next row
+        v1 = v0 + 3 * sz - i + 1
+        # handle even row
+        for j in range(v0, v1-1):
+            nv.append([j, j + 1, v1 - v0 + j])
+        # handle odd row
+        for j in range(3 * sz - i - 1):
+            nv.append([v1 + j, v0 + j + 1, v1 + j + 1])
+    nv = np.array(nv).T
+
+    return FvcomGrid(ncoord, nv, calc=True)
