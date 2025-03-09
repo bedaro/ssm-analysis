@@ -38,6 +38,7 @@ import contextily as cx
 from fvcom.grid import FvcomGrid
 from fvcom.depth import DepthCoordinate
 from fvcom.transect import Transect
+from ssm_an_util import Progress
 sys.path.append(sys.path[0] + '/..')
 from apis import API_KEYS
 
@@ -217,10 +218,8 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
     # Instead, I'm resorting to a blocking approach where MFDatasets are
     # created for only a few netCDF files at a time
     i = 0
-    total = 0
     logger.info("Extracting sections...")
-    start_time = time.perf_counter()
-    times_ct = len(time_range)
+    prog = Progress(len(time_range), force_log=not args.verbose, logger=logger)
     for cdfchunk in chunks(exist_cdfs, args.chunk_size):
         c = MFDataset(cdfchunk) if len(cdfchunk) > 1 else Dataset(cdfchunk[0])
         times_available = time_range.loc[
@@ -241,12 +240,9 @@ def do_extract(exist_cdfs, sects_config, output_dir, **kwargs):
 
         i += chunk_times
 
-        elapsed = (time.perf_counter() - start_time)
-        to_go = elapsed * (times_ct / i - 1)
-        total += data_size
-        logger.info("{0}/{1} ({2}s elapsed, {3}s to go, {4}KBps)".format(i,
-            times_ct, int(elapsed), int(to_go), int(total/elapsed/1000)))
+        prog.update(i, data_size)
 
+    prog.finish()
     if args.make_plots:
         logger.info("Generating plots")
         start_time = time.perf_counter()

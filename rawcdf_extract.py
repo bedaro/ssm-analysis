@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-import time
-import datetime
 import sys
 import os
 import tempfile
@@ -25,6 +23,7 @@ from fvcom.grid import FvcomGrid
 from fvcom.depth import DepthCoordinate
 from fvcom.transect import Transect
 from fvcom.control_volume import ControlVolume
+from ssm_an_util import Progress
 
 domain_nodes_shp = "gis/ssm domain nodes.shp"
 masked_nodes_txt = "gis/masked nodes.txt"
@@ -314,9 +313,9 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
     indata.close()
     i = 0 # The count of times actually copied
     t = 0 # The next time index to examine
-    total = 0
     logger.info("Beginning extraction...")
-    start_time = time.perf_counter()
+    prog = Progress(outdata.dimensions['time'].size, force_log=not args.verbose,
+                    logger=logger)
     times_ct = outdata.dimensions['time'].size
     for cdfchunk in chunks(exist_cdfs, args.chunk_size):
         # Stop condition: we've gone past args.tto
@@ -325,14 +324,11 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
         c = MFDataset(cdfchunk) if len(cdfchunk) > 1 else Dataset(cdfchunk[0])
         chunk_times = len(c.dimensions['time'])
         # Skip condition: chunk's times are entirely before args.tfrom
-        if t + chunk_times < first_time:
+        # Note that t + chunk_times is the stop index and isn't actually copied
+        # in this pass
+        if t + chunk_times <= first_time:
             c.close()
-            msg = f"[seeking to {args.tfrom.strftime('%Y-%m-%d')}...]"
-            if args.verbose and sys.stdout.isatty():
-                sys.stdout.write('\r' + msg)
-                sys.stdout.flush()
-            else:
-                logger.info(msg)
+            prog.skip(args.tfrom.strftime('%Y-%m-%d'))
             t += chunk_times
             continue
 
@@ -342,41 +338,12 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
                          i, **vars(args))
         i += chunk_last - chunk_first
         t += chunk_times
-        i_str = (" " * (int(np.log10(times_ct)) - int(np.log10(i)))) + str(i)
-        pct = str(int(i*100/times_ct))
-        pct = (" " * (3 - len(pct))) + pct
         c.close()
+        prog.update(i, np.sum([d.size * d.itemsize for k,d in data.items()]))
 
-        elapsed = (time.perf_counter() - start_time)
-        to_go = elapsed * (times_ct / i - 1)
-        total_time = elapsed + to_go
-        total += np.sum([d.size * d.itemsize for k,d in data.items()])
-        rate = int(total / elapsed / 1000)
-        msg = f"{i_str}/{times_ct} [{pct}%]:  {format_time(int(elapsed), total_time)} elapsed;  {format_time(int(to_go), total_time)} to go;  {rate}KBps"
-        if args.verbose and sys.stdout.isatty():
-            sys.stdout.write('\r' + msg)
-            sys.stdout.flush()
-        else:
-            logger.info(msg)
-    if args.verbose and sys.stdout.isatty():
-        sys.stdout.write('\n')
+    prog.finish()
     logger.info("Extraction finished.")
     outdata.close()
-
-def format_time(seconds, rg=None):
-    """Nice format of a time in seconds according to an optional range"""
-    if rg is None:
-        rg = seconds
-    if rg > 60:
-        if rg > 3600:
-            fstr = "%Hh%Mm%Ss"
-        else:
-            fstr = "%Mm%Ss"
-    else:
-        fstr = "%Ss"
-    dt_mid = datetime.datetime(1990, 1, 5)
-    dt = dt_mid + datetime.timedelta(seconds=seconds)
-    return dt.time().strftime(fstr)
 
 def get_photic_mask(cdfin, node_ids):
     times_per_day = int(86400 / (cdfin['time'][1] - cdfin['time'][0]))
