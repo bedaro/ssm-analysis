@@ -131,7 +131,7 @@ def main():
         idxr &= dfs['nodes']['Source Type'] == args.source_type
     if args.country is not None:
         idxr &= dfs['nodes']['Country'] == args.country
-    if len(args.regions) > 0:
+    if args.regions is not None:
         idxr &= np.isin(dfs['nodes']['Region'], args.regions)
     if np.all(idxr):
         selected_rivers = dfs['nodes'][['FVCOM ID','Name','Source Type']]

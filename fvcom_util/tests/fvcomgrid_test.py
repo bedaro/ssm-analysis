@@ -85,6 +85,8 @@ class TestFvcomGrid(unittest.TestCase):
         self.assertEqual(4/3, elcoord[0, 4])
         self.assertEqual(3, elcoord[1, 4])
 
+class TestGenerators(unittest.TestCase):
+
     def test_uniform_triangular(self):
         grid1 = uniform_triangular(sz=3)
         self.assertEqual(6, grid1.m)
@@ -99,6 +101,19 @@ class TestFvcomGrid(unittest.TestCase):
         self.assertTrue(np.allclose([3.5, np.sqrt(3)/2], grid2.ncoord[:,9]))
         self.assertTrue(np.allclose([3, 2*np.sqrt(3)/2], grid2.ncoord[:,13]))
 
+    def test_uniform_hex(self):
+        grid1 = uniform_hex(sz=1)
+        self.assertEqual(7, grid1.m)
+        self.assertEqual(6, grid1.n)
+        self.assertTrue(np.allclose([0, np.sqrt(3)/2], grid1.ncoord[:,2]))
+        self.assertTrue(np.allclose(np.sqrt(3)/4, grid1.elements_gdf()['geometry'].area))
+
+        grid2 = uniform_hex(sz=3)
+        self.assertEqual(37, grid2.m)
+        self.assertEqual(54, grid2.n)
+        self.assertTrue(np.allclose([1.5, 0], grid2.ncoord[:,0]))
+        self.assertTrue(np.allclose([0, 3*np.sqrt(3)/2], grid2.ncoord[:,15]))
+        self.assertTrue(np.allclose(np.sqrt(3)/4, grid2.elements_gdf()['geometry'].area))
 
 if __name__ == '__main__':
     unittest.main()
