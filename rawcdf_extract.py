@@ -255,27 +255,31 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
                     cv = ControlVolume(grid=grid, nodes=nodes, calc=True)
                 else:
                     cv = cv + nodes
-            logger.debug("get_node_ids found {0} nodes in {1} shapefiles".format(
+            logger.info("get_node_ids found {0} nodes in {1} shapefiles".format(
                 len(cv.nodes), len(args.domain_node_shapefiles)))
         else:
             allsections = ConfigParser()
             allsections.read_file(args.sections_config)
             transects = []
             for sect in args.sections:
+                if sect not in allsections:
+                    raise ValueError(f'Section {sect} not found in {args.sections_config}')
                 waypoints = np.array(allsections[sect]['waypoints'].split(' ')).astype(int)
                 tr = Transect.shortest(grid, waypoints)
                 transects.append(tr)
             cv = ControlVolume.from_transects(transects, calc=True)
-            logger.debug(f"control volume defined by {len(transects)} transects has {len(cv.nodes)} nodes")
+            logger.info(f"control volume defined by {len(transects)} transects has {len(cv.nodes)} nodes")
         if not args.no_masking:
             masked_nodes = np.loadtxt(args.masked_nodes_file).astype(np.int64)
             cv = cv - set(masked_nodes)
-            logger.debug(f"{len(cv.nodes)} remain after masking")
+            logger.info(f"{len(cv.nodes)} remain after masking")
         # Determine time range
         all_times = indata['time'][:]
         first_time = (all_times >= (args.tfrom - args.tstart).total_seconds()).nonzero()[0][0] if args.tfrom else 0
         last_time = (all_times <= (args.tto - args.tstart).total_seconds()).nonzero()[0][-1] + 1 if args.tto else len(all_times)
         time_slc = slice(first_time, last_time)
+        if len(cv.nodes) == 0:
+            raise ValueError("No nodes to extract.")
 
         logger.info("Initializing output file...")
         outdata = init_output(output_cdf, indata, args.tstart, time_slc,
