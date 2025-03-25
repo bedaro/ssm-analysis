@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.patheffects as pe
 from matplotlib.axes import Axes
 import geopandas as gpd
+from shapely.geometry import Point
 from shapely.ops import unary_union
 from adjustText import adjust_text
 import networkx as nx
@@ -200,7 +201,7 @@ class CVPlot:
                     zorder=1)
 
         xmin, xmax, ymin, ymax = bounds
-        self.ax.set(ybound=(ymin, ymax), xbound=(xmin, xmax))
+        self.ax.set(ylim=(ymin, ymax), xlim=(xmin, xmax))
 
         texts = []
         for x,y,l in self.labels:
@@ -212,7 +213,7 @@ class CVPlot:
         for h in helpers:
             h.reset()
             h.set_cv(self)
-            h(ax)
+            h(self.ax)
             texts.extend(h.texts)
             self.avoid.extend([Point(x, y) for x, y in zip(h.avoid_x, h.avoid_y)])
 
