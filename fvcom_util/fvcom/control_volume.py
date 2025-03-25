@@ -223,7 +223,7 @@ class CVPlot:
             for pt in self.avoid:
                 avoid_x.append(pt.x)
                 avoid_y.append(pt.y)
-            adjust_text(texts, avoid_x, avoid_y)
+            adjust_text(texts, avoid_x, avoid_y, ax=self.ax)
 
 @dataclass(frozen=True, kw_only=True)
 class TransectControlVolume(ControlVolume):
