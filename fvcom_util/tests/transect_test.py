@@ -57,6 +57,12 @@ class TestTransectBlock(unittest.TestCase):
         self.assertEqual(transect.eles[0], 4)
         self.assertEqual(transect.eles[-1], 15)
         self.assertEqual(transect.eles[3], 9)
+        # Also try with more than two waypoints
+        transect2 = Transect.shortest(self.grid, np.array([4,9,15]))
+        self.assertEqual(len(transect.eles), len(transect2.eles))
+        self.assertEqual(transect2.eles[0], 4)
+        self.assertEqual(transect2.eles[-1], 15)
+        self.assertEqual(transect2.eles[3], 9)
 
     def test_create_from_shortest_multi(self):
         transect1 = Transect.shortest(self.grid, np.array([4,15]))

@@ -55,6 +55,7 @@ class Transect:
         return self.grid.nv[self.grid.nbe[:,ele-1].nonzero()[0], ele-1]
 
     def _el_node_pair(self, i):
+        # Private. Find the pair of common nodes between adjacent els
         if i == 0:
             return self._el_boundary_nodes(self.eles[i])
         elif i == len(self.eles):
@@ -73,6 +74,7 @@ class Transect:
 
     @staticmethod
     def shortest(grid, waypoint_els):
+        """Create one or more transects by following the shortest path"""
         # Remove any zeros from the nbe's
         ele_adj_dict = grid.el_neis()
         G = nx.Graph(ele_adj_dict)
@@ -87,10 +89,10 @@ class Transect:
 
             # Find all the elements by taking the shortest path in the graph
             # through the given waypoints
-            eles = []
+            eles = [wps[0]]
             for w,x in zip(wps[:-1], wps[1:]):
                 eles.extend(nx.shortest_path(G, source=w, target=x,
-                    weight=lambda p1, p2, atts: grid.el_dist(p1, p2)))
+                                             weight=lambda p1, p2, atts: grid.el_dist(p1, p2))[1:])
             trs.append(Transect(grid, np.array(eles)))
         return trs[0] if scalar_arg else trs
 
