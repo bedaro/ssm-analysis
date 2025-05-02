@@ -26,8 +26,6 @@ import db
 # Dataframe that maps observation database parameter ID to NetCDF variable
 # name
 _parameter_map = pd.DataFrame({
-    # FIXME handle chla: I think just take B1 and multiply by the assumed
-    # chla to C ratio
     'param': ('temp','salt','o2','nh4','no23','ph','chla'),
     'output_var': ('temp','salinity','DOXG','NH4','NO3','pH',('B1','B2','B3')),
     # ICM State: temp and salinity are theoretically present but they're all 0's
@@ -36,7 +34,7 @@ _parameter_map = pd.DataFrame({
 }).set_index('param')
 
 _ratios = {
-    'chla': (37,50,1)
+    'chla': (1000/37,1000/50,1)
 }
 
 class Validator:
