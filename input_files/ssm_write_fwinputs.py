@@ -7,6 +7,7 @@ FVCOM-ICM.
 """
 
 from argparse import ArgumentParser, FileType
+from pathlib import Path
 import logging
 import sys
 
@@ -57,8 +58,10 @@ def check_data(dfs, start_date):
     if np.any(dfs['vqdist'].sum(axis=1) != 1):
         return (False, 'At least one VQDist row does not sum to 1')
 
-    if np.any(pd.isna(dfs['data'])):
-        return (False, 'NaNs present in data')
+    if np.any(pd.isna(dfs['data'].loc[dfs['data'].index.get_level_values(1).isin(dfs['nodes'].loc[dfs['nodes']['ICM Source']].index)])):
+        return (False, 'NaNs present in WQM data')
+    if np.any(pd.isna(dfs['data'][['discharge','temp','salt']])):
+        return (False, 'NaNs present in HYD data')
     # FIXME check that no state variables are missing. If they are, add
     # columns of zeros and log a warning
 
@@ -126,13 +129,20 @@ def main():
     parser = ArgumentParser(description="Convert a point source discharge spreadsheet into SSM input files")
     parser.add_argument("infile", type=FileType('rb'),
         help="The point sources spreadsheet")
-    parser.add_argument("out_base", help="The base of the output filename (_riv.dat and _wq.dat will be appended)")
+    parser.add_argument("out_base", nargs='?', default='',
+        help="The base of the output filename (_riv.dat and _wq.dat will be appended)")
     parser.add_argument("-s", "--start-date", type=pd.Timestamp,
         help="The zero date for the file. Defaults to the earliest date in the file")
     parser.add_argument("-v", "--verbose", action="store_true", dest="verbose", help="Print progress messages during the conversion")
     parser.add_argument("-c", "--comment", help="An optional comment to include in the first line")
     parser.set_defaults(verbose=False, start_date=None)
     args = parser.parse_args()
+    if args.out_base == '':
+        if args.infile.name == '<stdin>':
+            raise ValueError('Using stdin as input, so out_base argument required')
+        else:
+            p = Path(args.infile.name)
+            args.out_base = p.parent / p.stem
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
 
