@@ -78,8 +78,9 @@ def read_dat_file(f, start_date, num_statevars=None):
         node_data['Source Type'] = srctypes
         node_data['Region'] = regions
         node_data['Country'] = countries
-    node_df = pd.DataFrame(node_data).set_index('Node')
-    nodes = np.array(nodes)
+    node_df = pd.DataFrame(node_data)
+    if 'FVCOM ID' in node_df.columns:
+        node_df.set_index(['Node','FVCOM ID'], drop=False, inplace=True)
     # Depth distribution fractions into each node. Skipping the first
     # (node count) column
     vqdist = np.loadtxt([next(f) for l in range(num_qs)])[:,1:]
@@ -103,10 +104,19 @@ def read_dat_file(f, start_date, num_statevars=None):
     dates = pd.Timestamp(start_date) + pd.to_timedelta(times, 'h')
     dates.name = 'Date'
     node_data = []
-    for i,n in enumerate(nodes):
-        n_fill = np.zeros(len(times), dtype=np.int64) + n
-        df = pd.DataFrame({v: statedata[v][:,i] for v in statevars},
-                index=[dates,pd.Index(n_fill,name='Node')])
+    for i,idx in enumerate(node_df.index):
+        data = {v: statedata[v][:,i] for v in statevars}
+        data['Date'] = dates
+        idx_names = ['Date']
+        if np.ndim(idx) > 0:
+            for n,j in zip(node_df.index.names,idx):
+                idx = np.zeros(len(dates), dtype=int) + j
+                data[n] = idx
+                idx_names.append(n)
+        else:
+            data['Index'] = node_df.index
+            idx_names.append('Index')
+        df = pd.DataFrame(data).set_index(idx_names)
         node_data.append(df)
     node_data_df = pd.concat(node_data)
 
@@ -134,7 +144,7 @@ def read_merge_dats(riv_file, pnt_file, start_date):
     pnt_dfs['nodes']['ICM Source'] = True
     all_nodes_df = dfs['nodes'].join(pnt_dfs['nodes'], how='outer',
             rsuffix='_pnt')
-    dupcols = ('Comment','FVCOM ID','Dist Nodes','Dist Type','Name','Source Type','Region','Country')
+    dupcols = ('Node','Comment','FVCOM ID','Dist Nodes','Dist Type','Name','Source Type','Region','Country')
     for c in dupcols:
         all_nodes_df.fillna({c: all_nodes_df[f'{c}_pnt'] }, inplace=True)
         del all_nodes_df[f'{c}_pnt']
@@ -145,14 +155,15 @@ def read_merge_dats(riv_file, pnt_file, start_date):
     mismatches = dfs_match(dfs['vqdist'], pnt_dfs['vqdist'])
     if mismatches is not True:
         raise ValueError(f'vqdist columns {mismatches} do not match')
-    mismatches = dfs_match(dfs['data'], pnt_dfs['data'])
-    if mismatches is not True:
-        raise ValueError(f'nqtime columns {mismatches} do not match')
 
     # Merge the VQDist DataFrames
     all_vqdist_df = pd.concat((dfs['vqdist'], pnt_dfs['vqdist']))
     # https://stackoverflow.com/a/34297689
     all_vqdist_df = all_vqdist_df[~all_vqdist_df.index.duplicated(keep='first')]
+    mismatches = dfs_match(dfs['data'], pnt_dfs['data'])
+    if mismatches is not True:
+        logger.warning(f'nqtime columns {mismatches} do not match between hydro and WQ inputs.')
+        logger.warning(f'Proceeding anyway using the WQ data')
     # Merge the data DataFrames
     cond = dfs['data'].index.isin(pnt_dfs['data'].index)
     pruned_riv_data = dfs['data'].drop(dfs['data'][cond].index)

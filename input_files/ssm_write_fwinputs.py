@@ -25,11 +25,22 @@ ALL_STATEVARS = ('discharge', 'temp', 'salt', 'tss',  'alg1', 'alg2', 'alg3',
 
 def read_data(f):
     """Read an excel spreadsheet into DataFrames"""
-    dfs = {
-        'nodes': pd.read_excel(f, sheet_name='Nodes', index_col='Node'),
-        'vqdist': pd.read_excel(f, sheet_name='VQDist', index_col='Node'),
-        'data': pd.read_excel(f, sheet_name='Data', index_col=[0,1])
-    }
+    node_check = pd.read_excel(f, sheet_name='Nodes', nrows=10)
+    if node_check.columns[1] == 'FVCOM ID':
+        # New format
+        dfs = {
+            'nodes': pd.read_excel(f, sheet_name='Nodes', index_col=[0,1]),
+            'vqdist': pd.read_excel(f, sheet_name='VQDist', index_col=[0,1]),
+            'data': pd.read_excel(f, sheet_name='Data', index_col=[0,1,2]),
+            'version': 2
+        }
+    else:
+        dfs = {
+            'nodes': pd.read_excel(f, sheet_name='Nodes', index_col='Node'),
+            'vqdist': pd.read_excel(f, sheet_name='VQDist', index_col='Node'),
+            'data': pd.read_excel(f, sheet_name='Data', index_col=[0,1]),
+            'version': 1
+        }
     return dfs
 
 def check_data(dfs, start_date):
@@ -37,14 +48,15 @@ def check_data(dfs, start_date):
 
     # Check that every node listed in nodes has entries in vqdist and data
     if dfs['nodes'].index.has_duplicates:
-        return (False, 'Duplicate value(s) in Nodes')
+        return (False, 'Duplicate value(s) in Nodes indes')
     if dfs['vqdist'].index.has_duplicates:
-        return (False, 'Duplicate value(s) in VQDist')
+        return (False, 'Duplicate value(s) in VQDist index')
     if dfs['data'].index.has_duplicates:
-        return (False, 'Duplicate value(s) in Data')
+        return (False, 'Duplicate value(s) in Data index')
     if np.any(~np.isin(dfs['vqdist'].index.values, dfs['nodes'].index.values, assume_unique=True)):
-        return (False, 'At least one node in VQDist missing from Nodes')
-    if np.any(~np.isin(dfs['data'].index.get_level_values(1),
+        return (False, 'At least one source in VQDist missing from Nodes')
+    # FIXME
+    if np.any(~np.isin(dfs['data'].index.droplevel(0).values,
         dfs['nodes'].index.values, assume_unique=True)):
         return (False, 'At least one node in Data missing from Nodes')
 
@@ -58,7 +70,11 @@ def check_data(dfs, start_date):
     if np.any(dfs['vqdist'].sum(axis=1) != 1):
         return (False, 'At least one VQDist row does not sum to 1')
 
-    if np.any(pd.isna(dfs['data'].loc[dfs['data'].index.get_level_values(1).isin(dfs['nodes'].loc[dfs['nodes']['ICM Source']].index)])):
+    # FIXME for new format
+    mtest = dfs['nodes'].loc[dfs['nodes']['ICM Source']][['Comment']].merge(
+            dfs['data'], left_index=True, right_on=dfs['nodes'].index.names)
+    del mtest['Comment']
+    if np.any(pd.isna(mtest)):
         return (False, 'NaNs present in WQM data')
     if np.any(pd.isna(dfs['data'][['discharge','temp','salt']])):
         return (False, 'NaNs present in HYD data')
@@ -75,8 +91,8 @@ def convert_dates(data_df, start_date=None):
     dates = data_df.index.get_level_values(0)
     times = (dates - start_date) / np.timedelta64(1, 'h')
     times.name = 'Hours'
-    return data_df.set_index(pd.MultiIndex.from_arrays([times,
-        data_df.index.get_level_values(1)]))
+    return data_df.set_index(pd.MultiIndex.from_arrays([times] +
+        [data_df.index.get_level_values(i) for i in range(1, data_df.index.nlevels)]))
 
 def write_dat_file(f, dfs, inflow_type, point_st_type, num_statevars=None, hdr_comment=None):
     """Write dfs to a .dat file
@@ -92,13 +108,13 @@ def write_dat_file(f, dfs, inflow_type, point_st_type, num_statevars=None, hdr_c
     print(len(dfs['nodes']), file=f)
     m = pd.merge(dfs['nodes'], dfs['vqdist'], left_index=True,
         right_index=True, validate='one_to_one', how='left')
-    for n,row in m.iterrows():
+    for n,row in (m if m.index.nlevels == 1 else m[['Comment']].set_index(m.index.droplevel(1))).iterrows():
         print(f"{n:7d}{' ! ' + row['Comment'] if row['Comment'] else ''}", file=f)
 
     # VQDIST
     nodes_digits = int(np.ceil(np.log10(nodes+0.1)))
     siglay_formatstr = "{:%dd} " % nodes_digits + " ".join(["{:.4f}" for l in dfs['vqdist'].columns])
-    for i,(n,row) in enumerate(m.iterrows()):
+    for i,(idx,row) in enumerate(m.iterrows()):
         print(siglay_formatstr.format(*[i+1] + [row[c] for c in dfs['vqdist'].columns]), file=f)
 
     # Nqtime
@@ -108,11 +124,15 @@ def write_dat_file(f, dfs, inflow_type, point_st_type, num_statevars=None, hdr_c
     # precision so go with this instead
     formatstr = "".join([" {:9.8g}" for l in range(nodes)])
     # Filter out any node data not in the main node list
-    filtered_data = dfs['data'].loc[np.isin(dfs['data'].index.get_level_values(1), m.index)]
+    filtered_data = m[['Comment']].merge(dfs['data'], left_index=True,
+                                         right_on=m.index.names)
+    del filtered_data['Comment']
+    #filtered_data = dfs['data'].loc[np.isin(dfs['data'].index.get_level_values(1), m.index)]
     for t,group in filtered_data.groupby('Hours'):
         # Ensure the filtered list is sorted the same way as the main nodes
-        time_data = group.set_index(group.index.get_level_values(1)
-                ).reindex(m.index)
+        time_data = group.set_index(pd.MultiIndex.from_arrays(
+            [group.index.get_level_values(i) for i in range(1, group.index.nlevels)]
+        )).reindex(m.index)
         print(f"     {t:.2f}", file=f)
         for v in statevars:
             print(formatstr.format(*time_data[v].to_numpy()), file=f)
@@ -122,7 +142,8 @@ def get_icm_data_only(dfs):
     return {
             'nodes': dfs['nodes'].loc[dfs['nodes']['ICM Source']],
             'vqdist': dfs['vqdist'],
-            'data': dfs['data']
+            'data': dfs['data'],
+            'version': dfs['version']
     }
 
 def main():
