@@ -49,9 +49,9 @@ class TestSsmReadFwinputs(unittest.TestCase):
         self.assertEqual(point_st_type, 'pttype')
 
         self.assertEqual(len(dfs['nodes']), 4)
-        self.assertEqual(dfs['nodes'].index[0], 26)
-        self.assertEqual(dfs['nodes'].index[1], 87)
-        self.assertEqual(dfs['nodes'].index[2], 94)
+        self.assertEqual(dfs['nodes']['Node'].iloc[0], 26)
+        self.assertEqual(dfs['nodes']['Node'].iloc[1], 87)
+        self.assertEqual(dfs['nodes']['Node'].iloc[2], 94)
         self.assertEqual(len(dfs['data']), 8) # 4 nodes by 2 times
 
 if __name__ == '__main__':
