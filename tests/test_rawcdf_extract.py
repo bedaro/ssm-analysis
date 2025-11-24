@@ -91,7 +91,7 @@ class TestRawcdfExtract(unittest.TestCase):
                                               diskless=True)
         rawcdf_extract.init_output_vars(self.ds2, self.ds, outprefix='copy',
                                         input_vars=invars)
-        copied = rawcdf_extract.copy_data(self.ds, self.ds2, self.cv, tslc,
+        copied = rawcdf_extract.copy_data(self.ds, self.ds2, self.cv, tslc, 0,
                                           outprefix='copy', input_vars=invars)
 
         self.assertIn('copydata_node', copied)
