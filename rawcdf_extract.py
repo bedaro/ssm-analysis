@@ -214,8 +214,6 @@ def main():
     # This is the workaround
     if not args.input_vars:
         args.input_vars = [("DOXG",InputAttr.BOTTOM)]
-    if not args.domain_node_shapefiles and not args.sections:
-        args.domain_node_shapefiles = [os.path.join(script_home, domain_nodes_shp)]
 
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
     #logger.setLevel(logging.DEBUG)
@@ -257,7 +255,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
                     cv = cv + nodes
             logger.info("get_node_ids found {0} nodes in {1} shapefiles".format(
                 len(cv.nodes), len(args.domain_node_shapefiles)))
-        else:
+        elif args.sections:
             allsections = ConfigParser()
             allsections.read_file(args.sections_config)
             transects = []
@@ -269,6 +267,9 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
                 transects.append(tr)
             cv = ControlVolume.from_transects(transects, calc=True)
             logger.info(f"control volume defined by {len(transects)} transects has {len(cv.nodes)} nodes")
+        else:
+            # Select all nodes by default
+            cv = ControlVolume(grid=grid, nodes=set(np.arange(grid.m)+1), calc=True)
         if not args.no_masking:
             masked_nodes = np.loadtxt(args.masked_nodes_file).astype(np.int64)
             cv = cv - set(masked_nodes)
@@ -277,6 +278,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
         all_times = indata['time'][:]
         first_time = (all_times >= (args.tfrom - args.tstart).total_seconds()).nonzero()[0][0] if args.tfrom else 0
         last_time = (all_times <= (args.tto - args.tstart).total_seconds()).nonzero()[0][-1] + 1 if args.tto else len(all_times)
+        times_ct = len(all_times)
         time_slc = slice(first_time, last_time)
         if len(cv.nodes) == 0:
             raise ValueError("No nodes to extract.")
@@ -285,6 +287,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
         outdata = init_output(output_cdf, indata, args.tstart, time_slc,
                               cv, args.input_vars, zeta_per_run=args.zeta_per_run)
         outdata['time'][:] = indata['time'][time_slc] / 3600 / 24
+        out_offset = 0
     else:
         logger.info("Opening existing output file...")
         outdata = append_output(output_cdf)
@@ -292,24 +295,28 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
             args.tstart = Timestamp(outdata.model_start)
         cv = ControlVolume(grid=grid, nodes=set(outdata['node'][:]), calc=True)
         all_times = indata['time'][:] / 3600 / 24
-        if outdata['time'][0] not in all_times:
-            logger.error(f"Start extraction time {outdata['time'][0]} not present in output file")
-            logger.error(f"Output time range is {all_times[0]} - {all_times[-1]}")
+        out_times = outdata['time'][:]
+        matching_times = sorted(list(set(all_times).intersection(out_times)))
+        if len(matching_times) == 0:
+            logger.error(f"Extraction time range {outdata['time'][0]} - {out_times[-1]} does not overlap with model outputs")
+            logger.error(f"Model output time range is {all_times[0]} - {all_times[-1]}")
             outdata.close()
             indata.close()
             sys.exit(1)
-        first_time = (all_times == outdata['time'][0]).nonzero()[0][0]
-        if outdata['time'][-1] not in all_times:
-            logger.error(f"End extraction time {outdata['time'][-1]} not present in output file")
-            logger.error(f"Output time range is {all_times[0]} - {all_times[-1]}")
-            outdata.close()
-            indata.close()
-            sys.exit(1)
-        last_time = (all_times == outdata['time'][-1]).nonzero()[0][0] + 1
+        if matching_times[0] != out_times[0]:
+            logger.warning(f"Model is missing output between times {out_times[0]:.3f} and {matching_times[0]:.3f}")
+        if matching_times[-1] != out_times[-1]:
+            logger.warning(f"Model is missing output between times {matching_times[-1]:.3f} and {out_times[-1]:.3f}")
+        first_time = (all_times == matching_times[0]).nonzero()[0][0]
+        last_time = (all_times == matching_times[-1]).nonzero()[0][0] + 1
         time_slc = slice(first_time, last_time)
+        times_ct = len(matching_times)
         args.tfrom = args.tstart + Timedelta(all_times[first_time] * 3600 * 24, 's')
+        out_offset = (outdata['time'][:] == matching_times[0]).nonzero()[0][0]
     init_output_vars(outdata, indata, **vars(args))
     logger.debug(f'First time: {first_time}; Last time: {last_time}')
+    if out_offset != 0:
+        logger.debug(f'Output offset is {out_offset}')
 
     # Attempts to use the entire MFDataset don't seem to scale well.
     # Instead, I'm resorting to a blocking approach where MFDatasets are
@@ -318,9 +325,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
     i = 0 # The count of times actually copied
     t = 0 # The next time index to examine
     logger.info("Beginning extraction...")
-    prog = Progress(outdata.dimensions['time'].size, force_log=not args.verbose,
-                    logger=logger)
-    times_ct = outdata.dimensions['time'].size
+    prog = Progress(times_ct, force_log=not args.verbose, logger=logger)
     for cdfchunk in chunks(exist_cdfs, args.chunk_size):
         # Stop condition: we've gone past args.tto
         if t >= last_time:
@@ -339,11 +344,15 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
         chunk_first = max(first_time - t, 0)
         chunk_last = min(chunk_times, last_time - t)
         data = copy_data(c, outdata, cv, slice(chunk_first, chunk_last),
-                         i, **vars(args))
+                         i + out_offset, **vars(args))
         i += chunk_last - chunk_first
         t += chunk_times
         c.close()
         prog.update(i, np.sum([d.size * d.itemsize for k,d in data.items()]))
+
+    if args.force_overwrite and (out_offset > 0 or out_offset + last_time < outdata.dimensions['time'].size):
+        mask_missing(outdata, out_offset, out_offset + last_time - first_time,
+                     **vars(args))
 
     prog.finish()
     logger.info("Extraction finished.")
@@ -387,6 +396,25 @@ def calc_alln2(z, r, debug=False):
         zsp = np.linspace(z[0], z[-1], 100)
         ax.plot(spl(zsp), zsp)
     return -g / (1000+z) * dpdz
+
+def mask_missing(cdfout, start, end, **kwargs):
+    """Mask areas of the new output file variables that are outside start and end"""
+    args = Namespace(**kwargs)
+    def do_mask(var):
+        shape = list(cdfout[var].shape)
+        if start > 0:
+            shape[0] = start
+            cdfout[var][0:start, :] = np.ma.array(np.zeros(shape), mask=True)
+        if end < cdfout.dimensions['time'].size:
+            shape[0] = cdfout.dimensions['time'].size - end
+            cdfout[var][end:, :] = np.ma.array(np.zeros(shape), mask=True)
+
+    if 'zeta_per_run' in args and args.zeta_per_run:
+        zetavar = get_var_name(args.outprefix, 'zeta')
+        do_mask(zetavar)
+    for var, attr in args.input_vars:
+        out_name = get_var_name(args.outprefix, var, attr)
+        do_mask(out_name)
 
 def copy_data(cdfin, cdfout, cv, time_slc, timeidx, **kwargs):
     """Copy data from cdfin to cdfout

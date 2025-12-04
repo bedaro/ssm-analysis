@@ -237,7 +237,7 @@ class ModelValidator(Validator):
             return v
 
     def get_times(self, slc=slice(None)):
-        return self.start_date + pd.to_timedelta(self.model_output['time'][slc], 'S')
+        return self.start_date + pd.to_timedelta(self.model_output['time'][slc], 's')
 
     def _get_t_indices(self, datetimes):
         return np.searchsorted(self.model_t_midpoints, datetimes)
