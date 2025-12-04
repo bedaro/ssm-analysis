@@ -172,7 +172,8 @@ def read_merge_dats(riv_file, pnt_file, start_date):
     return ({
         'nodes': all_nodes_df,
         'vqdist': all_vqdist_df,
-        'data': all_data_df
+        'data': all_data_df,
+        'version': 2
         }, inflow_type, point_st_type)
 
 def write_spreadsheet(dfs, out_file_excel):
