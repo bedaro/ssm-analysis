@@ -146,6 +146,25 @@ def get_icm_data_only(dfs):
             'version': dfs['version']
     }
 
+def repeat_data(data_df: pd.DataFrame, times: int=1) -> pd.DataFrame:
+    """Repeat the given data by appending it with increased values for first index level"""
+    copies = [data_df]
+    time_vals = data_df.index.levels[0]
+    n = len(time_vals)
+    incr = int((time_vals[-1] - time_vals[0]) * (1 + 1/(n-1)))
+    passes = 0
+    while times >= 1:
+        passes += 1
+        copy = data_df.set_index(
+                data_df.index.set_levels(
+                    data_df.index.levels[0] + passes * incr,
+                    level=0
+                )
+            )
+        copies.append(copy)
+        times -= 1
+    return pd.concat(copies)
+
 def main():
     parser = ArgumentParser(description="Convert a point source discharge spreadsheet into SSM input files")
     parser.add_argument("infile", type=FileType('rb'),
@@ -156,6 +175,8 @@ def main():
         help="The zero date for the file. Defaults to the earliest date in the file")
     parser.add_argument("-v", "--verbose", action="store_true", dest="verbose", help="Print progress messages during the conversion")
     parser.add_argument("-c", "--comment", help="An optional comment to include in the first line")
+    parser.add_argument("--count", type=int, default=1,
+        help="For creating repetitions of boundary conditions")
     parser.set_defaults(verbose=False, start_date=None)
     args = parser.parse_args()
     if args.out_base == '':
@@ -178,6 +199,9 @@ def main():
 
     logger.info("Adjusting dates/times")
     dfs['data'] = convert_dates(dfs['data'], args.start_date)
+
+    if args.count > 1:
+        dfs['data'] = repeat_data(dfs['data'], times=args.count - 1)
 
     logger.info(f"Writing River file")
     with open(f'{args.out_base}_riv.dat','w') as out_riv_file:
