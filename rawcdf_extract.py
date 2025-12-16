@@ -109,7 +109,7 @@ def init_output_vars(output, indata, **kwargs):
     for var, attr in args.input_vars:
         out_name = get_var_name(args.outprefix, var, attr)
         dims = list(indata[var if var != 'N2' else 'temp'].dimensions)
-        if attr != InputAttr.ALL and 'siglay' in dims:
+        if attr != InputAttr.ALL and attr != InputAttr.PHOTIC and 'siglay' in dims:
             dims.remove('siglay')
         # Create any additional dimensions needed
         for d in dims:
