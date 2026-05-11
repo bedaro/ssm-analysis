@@ -4,7 +4,6 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-  - ipython
   - numpy
   - matplotlib-base
   - matplotlib-inline
@@ -17,7 +16,6 @@ dependencies:
   - psycopg2
   - scikit-learn
   - psutil
-  - jupyter_client
   - ipykernel
   - pandas
   - rtree
