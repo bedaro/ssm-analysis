@@ -238,6 +238,57 @@ def main():
     else:
         do_extract(args.incdf, args.outcdf, **vars(args))
 
+def tweak_times(times):
+    """Adjust time indices that are off by 40 seconds"""
+    # Look to see if the times are an even number of minutes if we
+    # add 40 seconds (the default timestep) to them)
+    onetime = times[3]
+    if (onetime + 40) / 60 == int((onetime + 40) / 60):
+        return times + 40
+    else:
+        return times
+
+@dataclass
+class TimeRange:
+    """Class for storing data about overlapping values between two ordered lists"""
+    first_time: int # First input index
+    last_time: int # Last input index
+    out_offset: int # First output index
+
+    @staticmethod
+    def from_matching(t1: np.array, t2: np.array):
+        """Identify indices of t1 that match beginning and end of t2"""
+        matching_times = sorted(list(set(t1).intersection(t2)))
+        if len(matching_times) == 0:
+            raise IndexError("Extraction time range {t2[0]} - {t2[-1]} does not overlap with model outputs {t1[0]} - {t1[-1]}")
+        if matching_times[0] != t2[0]:
+            logger.warning(f"Model is missing output between times {t2[0]:.3f} and {matching_times[0]:.3f}")
+        if matching_times[-1] != t2[-1]:
+            logger.warning(f"Model is missing output between times {matching_times[-1]:.3f} and {out_times[-1]:.3f}")
+        first_time = (t1 == matching_times[0]).nonzero()[0][0]
+        last_time = (t1 == matching_times[-1]).nonzero()[0][0] + 1
+        if last_time - first_time != len(matching_times):
+            # FIXME not sure this is a complete check
+            raise IndexError('Time intervals do not match')
+        out_offset = (t2 == matching_times[0]).nonzero()[0][0]
+        return TimeRange(first_time, last_time, out_offset)
+
+    @staticmethod
+    def from_t_start_end(times, start: Timestamp,
+                     frm: Timestamp, to: Timestamp):
+        """New output based on certain start/end dates"""
+        first_time = (times >= (frm - start).total_seconds()).nonzero()[0][0] if frm else 0
+        last_time = (times <= (to - start).total_seconds()).nonzero()[0][-1] + 1 if to else len(times)
+        return TimeRange(first_time, last_time, 0)
+
+    def __len__(self):
+        return self.last_time - self.first_time
+
+    @property
+    def slc(self):
+        """Slice for input times"""
+        return slice(self.first_time, self.last_time)
+
 def do_extract(exist_cdfs, output_cdf, **kwargs):
     args = Namespace(**kwargs)
     indata = MFDataset(exist_cdfs) if len(exist_cdfs) > 1 else Dataset(exist_cdfs[0])
@@ -275,48 +326,35 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
             cv = cv - set(masked_nodes)
             logger.info(f"{len(cv.nodes)} remain after masking")
         # Determine time range
-        all_times = indata['time'][:]
-        first_time = (all_times >= (args.tfrom - args.tstart).total_seconds()).nonzero()[0][0] if args.tfrom else 0
-        last_time = (all_times <= (args.tto - args.tstart).total_seconds()).nonzero()[0][-1] + 1 if args.tto else len(all_times)
-        times_ct = len(all_times)
-        time_slc = slice(first_time, last_time)
+        all_times = tweak_times(indata['time'][:])
+        timerange = TimeRange.from_t_start_end(args.tstart, args.tfrom, args.tto)
         if len(cv.nodes) == 0:
             raise ValueError("No nodes to extract.")
 
         logger.info("Initializing output file...")
-        outdata = init_output(output_cdf, indata, args.tstart, time_slc,
-                              cv, args.input_vars, zeta_per_run=args.zeta_per_run)
-        outdata['time'][:] = indata['time'][time_slc] / 3600 / 24
-        out_offset = 0
+        outdata = init_output(output_cdf, indata, args.tstart,
+                              timerange.slc, cv, args.input_vars,
+                              zeta_per_run=args.zeta_per_run)
+        outdata['time'][:] = all_times[timerange.slc] / 3600 / 24
     else:
         logger.info("Opening existing output file...")
         outdata = append_output(output_cdf)
         if outdata.model_start:
             args.tstart = Timestamp(outdata.model_start)
         cv = ControlVolume(grid=grid, nodes=set(outdata['node'][:]), calc=True)
-        all_times = indata['time'][:] / 3600 / 24
-        out_times = outdata['time'][:]
-        matching_times = sorted(list(set(all_times).intersection(out_times)))
-        if len(matching_times) == 0:
-            logger.error(f"Extraction time range {outdata['time'][0]} - {out_times[-1]} does not overlap with model outputs")
-            logger.error(f"Model output time range is {all_times[0]} - {all_times[-1]}")
+        all_times = tweak_times(indata['time'][:]) / 3600 / 24
+        try:
+            timerange = TimeRange.from_matching(all_times, outdata['time'][:])
+        except IndexError as e:
+            logger.error(str(e))
             outdata.close()
             indata.close()
             sys.exit(1)
-        if matching_times[0] != out_times[0]:
-            logger.warning(f"Model is missing output between times {out_times[0]:.3f} and {matching_times[0]:.3f}")
-        if matching_times[-1] != out_times[-1]:
-            logger.warning(f"Model is missing output between times {matching_times[-1]:.3f} and {out_times[-1]:.3f}")
-        first_time = (all_times == matching_times[0]).nonzero()[0][0]
-        last_time = (all_times == matching_times[-1]).nonzero()[0][0] + 1
-        time_slc = slice(first_time, last_time)
-        times_ct = len(matching_times)
-        args.tfrom = args.tstart + Timedelta(all_times[first_time] * 3600 * 24, 's')
-        out_offset = (outdata['time'][:] == matching_times[0]).nonzero()[0][0]
+        args.tfrom = args.tstart + Timedelta(all_times[timerange.first_time] * 3600 * 24, 's')
     init_output_vars(outdata, indata, **vars(args))
-    logger.debug(f'First time: {first_time}; Last time: {last_time}')
-    if out_offset != 0:
-        logger.debug(f'Output offset is {out_offset}')
+    logger.debug(f'First time: {timerange.first_time}; Last time: {timerange.last_time}')
+    if timerange.out_offset != 0:
+        logger.debug(f'Output offset is {timerange.out_offset}')
 
     # Attempts to use the entire MFDataset don't seem to scale well.
     # Instead, I'm resorting to a blocking approach where MFDatasets are
@@ -325,33 +363,33 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
     i = 0 # The count of times actually copied
     t = 0 # The next time index to examine
     logger.info("Beginning extraction...")
-    prog = Progress(times_ct, force_log=not args.verbose, logger=logger)
+    prog = Progress(len(timerange), force_log=not args.verbose, logger=logger)
     for cdfchunk in chunks(exist_cdfs, args.chunk_size):
         # Stop condition: we've gone past args.tto
-        if t >= last_time:
+        if t >= timerange.last_time:
             break
         c = MFDataset(cdfchunk) if len(cdfchunk) > 1 else Dataset(cdfchunk[0])
         chunk_times = len(c.dimensions['time'])
         # Skip condition: chunk's times are entirely before args.tfrom
         # Note that t + chunk_times is the stop index and isn't actually copied
         # in this pass
-        if t + chunk_times <= first_time:
+        if t + chunk_times <= timerange.first_time:
             c.close()
             prog.skip(args.tfrom.strftime('%Y-%m-%d'))
             t += chunk_times
             continue
 
-        chunk_first = max(first_time - t, 0)
-        chunk_last = min(chunk_times, last_time - t)
+        chunk_first = max(timerange.first_time - t, 0)
+        chunk_last = min(chunk_times, timerange.last_time - t)
         data = copy_data(c, outdata, cv, slice(chunk_first, chunk_last),
-                         i + out_offset, **vars(args))
+                         i + timerange.out_offset, **vars(args))
         i += chunk_last - chunk_first
         t += chunk_times
         c.close()
         prog.update(i, np.sum([d.size * d.itemsize for k,d in data.items()]))
 
-    if args.force_overwrite and (out_offset > 0 or out_offset + last_time < outdata.dimensions['time'].size):
-        mask_missing(outdata, out_offset, out_offset + last_time - first_time,
+    if args.force_overwrite and (timerange.out_offset > 0 or timerange.out_offset + timerange.last_time < outdata.dimensions['time'].size):
+        mask_missing(outdata, timerange.out_offset, timerange.out_offset + len(timerange),
                      **vars(args))
 
     prog.finish()

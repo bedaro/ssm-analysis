@@ -2,6 +2,8 @@
 
 import unittest
 import sys
+import logging
+from pathlib import Path
 
 from netCDF4 import Dataset
 import numpy as np
@@ -11,8 +13,54 @@ from fvcom.grid import FvcomGrid
 from fvcom.control_volume import ControlVolume
 
 # software under test
-sys.path.insert(0, sys.path[0] + '/..')
+sys.path.insert(0, str(Path(__file__).parent.parent))
 import rawcdf_extract
+
+logging.basicConfig(level=logging.ERROR)
+
+class TestTimeRange(unittest.TestCase):
+    def test_start_end_simple(self):
+        # From March 1 to March 30, daily interval
+        values = np.arange(0, 2592000, 86400)
+        start = Timestamp('2003.03.01')
+        frm = False
+        to = False
+        rg = rawcdf_extract.TimeRange.from_t_start_end(values, start, frm, to)
+        self.assertEqual(rg.first_time, 0)
+        self.assertEqual(rg.last_time, 30)
+        self.assertEqual(len(rg), 30)
+        self.assertEqual(rg.out_offset, 0)
+
+    def test_start_end_frm_to(self):
+        values = np.arange(0, 2591000, 86400)
+        start = Timestamp('2003.03.01')
+        frm = Timestamp('2003.03.05')
+        to = Timestamp('2003.03.25')
+        rg = rawcdf_extract.TimeRange.from_t_start_end(values, start, frm, to)
+        self.assertEqual(rg.first_time, 4)
+        self.assertEqual(rg.last_time, 25)
+        self.assertEqual(len(rg), 21)
+        self.assertEqual(rg.out_offset, 0)
+
+    def test_matching_no_offset(self):
+        values1 = np.arange(0, 100, 2)
+        values2 = np.arange(6, 60, 2)
+
+        rg = rawcdf_extract.TimeRange.from_matching(values1, values2)
+        self.assertEqual(rg.first_time, 3)
+        self.assertEqual(rg.last_time, 30)
+        self.assertEqual(len(rg), 27)
+        self.assertEqual(rg.out_offset, 0)
+
+    def test_matching_offset(self):
+        values1 = np.arange(8, 100, 4)
+        values2 = np.arange(0, 100, 4)
+        
+        rg = rawcdf_extract.TimeRange.from_matching(values1, values2)
+        self.assertEqual(rg.first_time, 0)
+        self.assertEqual(rg.last_time, 23)
+        self.assertEqual(len(rg), 23)
+        self.assertEqual(rg.out_offset, 2)
 
 # Test cases needed:
 # - copy_data
@@ -23,7 +71,7 @@ import rawcdf_extract
 class TestRawcdfExtract(unittest.TestCase):
     def setUp(self):
         # Read the fake model output
-        self.ds = Dataset('data/test_output.nc')
+        self.ds = Dataset(Path(__file__).parent / 'data' / 'test_output.nc')
         self.ds2 = None
         self.grid = FvcomGrid.from_output(self.ds)
         # Build a test CV to extract from. All nodes are contiguous
