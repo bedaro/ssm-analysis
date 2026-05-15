@@ -292,7 +292,13 @@ class TimeRange:
 def do_extract(exist_cdfs, output_cdf, **kwargs):
     args = Namespace(**kwargs)
     indata = MFDataset(exist_cdfs) if len(exist_cdfs) > 1 else Dataset(exist_cdfs[0])
-    grid = FvcomGrid.from_output(indata)
+    # Output files created with ssmhist2cdf do not have the necessary
+    # variables in them to construct a grid, so if this doesn't work
+    # we build the grid from the default grid file
+    try:
+        grid = FvcomGrid.from_output(indata)
+    except IndexError:
+        grid = FvcomGrid.from_mesh('SSM_grid/ssm_grid.2dm')
     cv = None
     if not os.path.exists(output_cdf):
         logger.info("Determining scope of work...")
