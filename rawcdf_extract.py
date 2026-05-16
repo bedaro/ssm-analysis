@@ -240,11 +240,16 @@ def main():
 
 def tweak_times(times):
     """Adjust time indices that are off by 40 seconds"""
+    # Start by rounding to the nearest 40 seconds. Text outputs converted
+    # with ssmhist2cdf sometimes have strange time indices
+    times = (times / 40).round() * 40
     # Look to see if the times are an even number of minutes if we
-    # add 40 seconds (the default timestep) to them)
+    # add or subtract 40 seconds (the default timestep) to them
     onetime = times[3]
     if (onetime + 40) / 60 == int((onetime + 40) / 60):
         return times + 40
+    if (onetime - 40) / 60 == int((onetime - 40) / 60):
+        return times - 40
     else:
         return times
 
@@ -258,18 +263,21 @@ class TimeRange:
     @staticmethod
     def from_matching(t1: np.array, t2: np.array):
         """Identify indices of t1 that match beginning and end of t2"""
+        # first round t1 and t2 to deal with floating point errors
+        t1 = (t1 * 10000).round() / 10000
+        t2 = (t2 * 10000).round() / 10000
         matching_times = sorted(list(set(t1).intersection(t2)))
         if len(matching_times) == 0:
-            raise IndexError("Extraction time range {t2[0]} - {t2[-1]} does not overlap with model outputs {t1[0]} - {t1[-1]}")
+            raise IndexError(f"Extraction time range {t2[0]} - {t2[-1]} does not overlap with model outputs {t1[0]} - {t1[-1]}")
         if matching_times[0] != t2[0]:
-            logger.warning(f"Model is missing output between times {t2[0]:.3f} and {matching_times[0]:.3f}")
+            logger.warning(f"Model is missing output between times {t1[0]:.3f} and {t2[0]:.3f}")
         if matching_times[-1] != t2[-1]:
-            logger.warning(f"Model is missing output between times {matching_times[-1]:.3f} and {out_times[-1]:.3f}")
+            logger.warning(f"Model is missing output between times {t2[-1]:.3f} and {t1[-1]:.3f}")
         first_time = (t1 == matching_times[0]).nonzero()[0][0]
         last_time = (t1 == matching_times[-1]).nonzero()[0][0] + 1
         if last_time - first_time != len(matching_times):
             # FIXME not sure this is a complete check
-            raise IndexError('Time intervals do not match')
+            raise IndexError(f'Time intervals do not match; model is {(t1[1]-t1[0])*24}, intermediate is {(t2[1]-t2[0])*24} hours')
         out_offset = (t2 == matching_times[0]).nonzero()[0][0]
         return TimeRange(first_time, last_time, out_offset)
 
@@ -298,7 +306,7 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
     try:
         grid = FvcomGrid.from_output(indata)
     except IndexError:
-        grid = FvcomGrid.from_mesh('SSM_grid/ssm_grid.2dm')
+        grid = FvcomGrid.from_mesh('SSM_Grid/ssm_grid.2dm')
     cv = None
     if not os.path.exists(output_cdf):
         logger.info("Determining scope of work...")
@@ -481,7 +489,7 @@ def copy_data(cdfin, cdfout, cv, time_slc, timeidx, **kwargs):
         dcoord = DepthCoordinate.from_output(cdfin)
         cdfin['siglev'].set_auto_mask(False)
     else:
-        dcoord = DepthCoordinate.from_asym_sigma(cv.grid, p_sigma=1.5)
+        dcoord = DepthCoordinate.from_asym_sigma(11, cv.grid, p_sigma=1.5)
     siglayers = dcoord.dz
     args = Namespace(**kwargs)
     times_ct = len(cdfin['time'][time_slc])
