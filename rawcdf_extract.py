@@ -264,21 +264,21 @@ class TimeRange:
     def from_matching(t1: np.array, t2: np.array):
         """Identify indices of t1 that match beginning and end of t2"""
         # first round t1 and t2 to deal with floating point errors
-        t1 = (t1 * 10000).round() / 10000
-        t2 = (t2 * 10000).round() / 10000
-        matching_times = sorted(list(set(t1).intersection(t2)))
+        t1i = (t1 * 5000).round().astype(int)
+        t2i = (t2 * 5000).round().astype(int)
+        matching_times = sorted(list(set(t1i).intersection(t2i)))
         if len(matching_times) == 0:
             raise IndexError(f"Extraction time range {t2[0]} - {t2[-1]} does not overlap with model outputs {t1[0]} - {t1[-1]}")
-        if matching_times[0] != t2[0]:
+        if matching_times[0] != t2i[0]:
             logger.warning(f"Model is missing output between times {t1[0]:.3f} and {t2[0]:.3f}")
-        if matching_times[-1] != t2[-1]:
+        if matching_times[-1] != t2i[-1]:
             logger.warning(f"Model is missing output between times {t2[-1]:.3f} and {t1[-1]:.3f}")
-        first_time = (t1 == matching_times[0]).nonzero()[0][0]
-        last_time = (t1 == matching_times[-1]).nonzero()[0][0] + 1
+        first_time = (t1i == matching_times[0]).nonzero()[0][0]
+        last_time = (t1i == matching_times[-1]).nonzero()[0][0] + 1
         if last_time - first_time != len(matching_times):
             # FIXME not sure this is a complete check
-            raise IndexError(f'Time intervals do not match; model is {(t1[1]-t1[0])*24}, intermediate is {(t2[1]-t2[0])*24} hours')
-        out_offset = (t2 == matching_times[0]).nonzero()[0][0]
+            raise IndexError(f'Time intervals do not match; model is {(t1[1]-t1[0]) * 24}, intermediate is {(t2[1]-t2[0]) * 24} hours')
+        out_offset = (t2i == matching_times[0]).nonzero()[0][0]
         return TimeRange(first_time, last_time, out_offset)
 
     @staticmethod
@@ -363,7 +363,8 @@ def do_extract(exist_cdfs, output_cdf, **kwargs):
             logger.error(str(e))
             outdata.close()
             indata.close()
-            sys.exit(1)
+            #sys.exit(1)
+            raise e
         args.tfrom = args.tstart + Timedelta(all_times[timerange.first_time] * 3600 * 24, 's')
     init_output_vars(outdata, indata, **vars(args))
     logger.debug(f'First time: {timerange.first_time}; Last time: {timerange.last_time}')
